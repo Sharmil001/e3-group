@@ -6,7 +6,7 @@ import os
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
-from pipecat.frames.frames import LLMMessagesFrame
+from pipecat.frames.frames import LLMMessagesAppendFrame
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair
 from pipecat.runner.run import main
@@ -82,7 +82,7 @@ async def bot(runner_args) -> None:
 
     @transport.event_handler("on_client_connected")
     async def on_client_connected(transport, client):
-        await task.queue_frames([LLMMessagesFrame([{"role": "user", "content": "Say hello briefly."}])])
+        await task.queue_frames([LLMMessagesAppendFrame([{"role": "user", "content": "Say hello briefly."}])])
 
     runner = PipelineRunner(handle_sigint=False)
     await runner.run(task)
