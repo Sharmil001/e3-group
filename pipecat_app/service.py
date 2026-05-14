@@ -62,11 +62,25 @@ class MegakernelTTSService(TTSService):
         self._url = url or os.getenv("TTS_WS_URL", "ws://localhost:8765/tts")
         self._connect_timeout_s = connect_timeout_s
         self._chunk_size_samples = chunk_size_samples
-        self._ws: Optional[websockets.WebSocketClientProtocol] = None
+        self._ws = None
         self._lock = asyncio.Lock()
 
-    async def _ensure_ws(self) -> websockets.WebSocketClientProtocol:
-        if self._ws is not None and not self._ws.closed:
+    def _ws_is_open(self) -> bool:
+        if self._ws is None:
+            return False
+        # websockets ≥ 12 uses ClientConnection with .state; older uses .closed
+        try:
+            from websockets.connection import State
+            return self._ws.state == State.OPEN
+        except (ImportError, AttributeError):
+            pass
+        try:
+            return not self._ws.closed
+        except AttributeError:
+            return False
+
+    async def _ensure_ws(self):
+        if self._ws_is_open():
             return self._ws
         log.info("Connecting to TTS backend at %s", self._url)
         self._ws = await asyncio.wait_for(
@@ -77,7 +91,7 @@ class MegakernelTTSService(TTSService):
 
     async def stop(self, frame=None) -> None:  # type: ignore[override]
         try:
-            if self._ws is not None and not self._ws.closed:
+            if self._ws_is_open():
                 await self._ws.close()
         finally:
             await super().stop(frame) if frame is not None else None
@@ -86,66 +100,57 @@ class MegakernelTTSService(TTSService):
         return True
 
     async def run_tts(self, text: str, context_id: str = "") -> AsyncGenerator[Frame, None]:  # type: ignore[override]
-        """Stream a single utterance. Yields TTSStartedFrame -> TTSAudioRawFrame*
-        -> TTSStoppedFrame."""
+        """Stream a single utterance — fresh WS connection per request.
 
-        async with self._lock:  # single-flight per service instance
-            ws = await self._ensure_ws()
+        Yields: TTSStartedFrame → TTSAudioRawFrame* → TTSStoppedFrame
+        """
+        async with self._lock:  # single-flight: megakernel has one global scratch buffer
             t_start = time.perf_counter()
-
-            await ws.send(json.dumps({"text": text}))
             yield TTSStartedFrame()
 
-            first_byte_yielded = False
             sample_rate = self.sample_rate
             leftover = np.empty(0, dtype=np.float32)
+            first_chunk = True
 
             try:
-                while True:
-                    msg = await ws.recv()
-                    if isinstance(msg, str):
-                        try:
-                            payload = json.loads(msg)
-                        except json.JSONDecodeError:
+                async with websockets.connect(self._url, max_size=2**25) as ws:
+                    await ws.send(json.dumps({"text": text}))
+                    while True:
+                        msg = await ws.recv()
+                        if isinstance(msg, str):
+                            try:
+                                payload = json.loads(msg)
+                            except json.JSONDecodeError:
+                                continue
+                            event = payload.get("event")
+                            if event == "started":
+                                sample_rate = int(payload.get("sample_rate", sample_rate))
+                            elif event in ("stopped", "error"):
+                                if event == "error":
+                                    yield ErrorFrame(payload.get("message", "tts error"))
+                                else:
+                                    log.info("TTS done: %.0f ms total", (time.perf_counter() - t_start) * 1000)
+                                break
                             continue
-                        event = payload.get("event")
-                        if event == "started":
-                            sample_rate = int(payload.get("sample_rate", sample_rate))
-                            continue
-                        if event == "stopped":
-                            stats = payload.get("stats", {})
-                            log.info(
-                                "TTS done: ttfc=%.1fms rtf=%.3f n=%d",
-                                stats.get("ttfc_ms", float("nan")),
-                                stats.get("rtf", float("nan")),
-                                stats.get("n_chunks", -1),
-                            )
-                            break
-                        if event == "error":
-                            yield ErrorFrame(payload.get("message", "tts error"))
-                            break
-                        continue
 
-                    # binary PCM float32
-                    arr = np.frombuffer(msg, dtype=np.float32)
-                    if self._chunk_size_samples > 0:
-                        arr = np.concatenate([leftover, arr])
-                        nfull = (arr.shape[0] // self._chunk_size_samples) * self._chunk_size_samples
-                        emit = arr[:nfull]
-                        leftover = arr[nfull:]
-                        for i in range(0, emit.shape[0], self._chunk_size_samples):
-                            chunk = emit[i : i + self._chunk_size_samples]
-                            yield self._make_audio_frame(chunk, sample_rate)
-                            if not first_byte_yielded:
-                                first_byte_yielded = True
-                                ttfc = (time.perf_counter() - t_start) * 1000.0
-                                log.info("TTFC (service-side): %.1f ms", ttfc)
-                    else:
-                        yield self._make_audio_frame(arr, sample_rate)
-                        if not first_byte_yielded:
-                            first_byte_yielded = True
-                            ttfc = (time.perf_counter() - t_start) * 1000.0
-                            log.info("TTFC (service-side): %.1f ms", ttfc)
+                        # Binary frame: PCM float32
+                        arr = np.frombuffer(msg, dtype=np.float32)
+                        if first_chunk:
+                            first_chunk = False
+                            log.info("TTFC: %.0f ms", (time.perf_counter() - t_start) * 1000)
+
+                        if self._chunk_size_samples > 0:
+                            arr = np.concatenate([leftover, arr])
+                            n = (arr.shape[0] // self._chunk_size_samples) * self._chunk_size_samples
+                            leftover = arr[n:]
+                            for i in range(0, n, self._chunk_size_samples):
+                                yield self._make_audio_frame(arr[i:i + self._chunk_size_samples], sample_rate)
+                        else:
+                            yield self._make_audio_frame(arr, sample_rate)
+
+            except Exception as exc:
+                log.error("TTS stream error: %s", exc)
+                yield ErrorFrame(str(exc))
             finally:
                 if self._chunk_size_samples > 0 and leftover.size > 0:
                     yield self._make_audio_frame(leftover, sample_rate)
