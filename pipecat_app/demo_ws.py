@@ -4,9 +4,9 @@ Avoids WebRTC entirely — audio flows browser → WebSocket (HTTPS) → server,
 which works through the Cloudflare tunnel without any UDP/ICE requirement.
 
 Flow per turn:
-  Browser (MediaRecorder WebM/opus)
+  Browser (Web Audio API raw PCM → WAV built client-side)
     → WebSocket /ws
-    → Deepgram REST transcription
+    → Deepgram REST transcription (WAV, no ffmpeg)
     → OpenAI gpt-4o-mini
     → TTS backend ws://localhost:8765/tts
     → PCM float32 chunks back over WebSocket
@@ -92,9 +92,10 @@ const proto = location.protocol === 'https:' ? 'wss' : 'ws';
 const ws = new WebSocket(`${proto}://${location.host}/ws`);
 ws.binaryType = 'arraybuffer';
 
-let audioCtx = null;
+// Separate AudioContext for playback (24 kHz TTS output)
+let playCtx = null;
 let playQueue = Promise.resolve();
-let sampleRate = 24000;
+let playSampleRate = 24000;
 
 ws.onmessage = async (e) => {
   if (typeof e.data === 'string') {
@@ -103,41 +104,60 @@ ws.onmessage = async (e) => {
     if (msg.type === 'llm_response') { addMsg(msg.text, 'bot'); status.textContent = 'Speaking…'; }
     if (msg.type === 'done') { btn.disabled = false; status.textContent = 'Ready'; }
     if (msg.type === 'error') { addMsg('Error: ' + msg.text, 'system'); btn.disabled = false; status.textContent = 'Ready'; }
-    if (msg.type === 'audio_start') { sampleRate = msg.sample_rate || 24000; }
+    if (msg.type === 'audio_start') {
+      playSampleRate = msg.sample_rate || 24000;
+      if (!playCtx || playCtx.sampleRate !== playSampleRate) {
+        if (playCtx) playCtx.close();
+        playCtx = new AudioContext({ sampleRate: playSampleRate });
+      }
+    }
     return;
   }
-  // binary: PCM float32 chunk
-  if (!audioCtx) audioCtx = new AudioContext({ sampleRate });
+  // binary: PCM float32 chunk from TTS
+  if (!playCtx) playCtx = new AudioContext({ sampleRate: playSampleRate });
   const pcm = new Float32Array(e.data);
   playQueue = playQueue.then(() => new Promise(resolve => {
-    const buf = audioCtx.createBuffer(1, pcm.length, sampleRate);
+    const buf = playCtx.createBuffer(1, pcm.length, playSampleRate);
     buf.getChannelData(0).set(pcm);
-    const src = audioCtx.createBufferSource();
+    const src = playCtx.createBufferSource();
     src.buffer = buf;
-    src.connect(audioCtx.destination);
+    src.connect(playCtx.destination);
     src.onended = resolve;
     src.start();
   }));
 };
 
-let recorder = null;
-let chunks = [];
-let mimeType = '';
+// --- Recording state ---
+let recCtx = null;
+let recSource = null;
+let recNode = null;
+let recStream = null;
+let pcmChunks = [];
+let isRecording = false;
 
-// Pick the best supported MIME type for this browser
-function pickMime() {
-  const candidates = [
-    'audio/webm;codecs=opus',
-    'audio/webm',
-    'audio/ogg;codecs=opus',
-    'audio/mp4;codecs=mp4a.40.2',
-    'audio/mp4',
-    '',
-  ];
-  for (const m of candidates) {
-    if (m === '' || MediaRecorder.isTypeSupported(m)) return m;
+function buildWav(float32Samples, sampleRate) {
+  // Convert Float32 → Int16
+  const int16 = new Int16Array(float32Samples.length);
+  for (let i = 0; i < float32Samples.length; i++) {
+    const s = Math.max(-1, Math.min(1, float32Samples[i]));
+    int16[i] = s < 0 ? s * 32768 : s * 32767;
   }
-  return '';
+  const dataBytes = int16.byteLength;
+  const buf = new ArrayBuffer(44 + dataBytes);
+  const v = new DataView(buf);
+  const ws4 = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+  ws4(0, 'RIFF'); v.setUint32(4, 36 + dataBytes, true);
+  ws4(8, 'WAVE'); ws4(12, 'fmt ');
+  v.setUint32(16, 16, true);      // chunk size
+  v.setUint16(20, 1, true);       // PCM
+  v.setUint16(22, 1, true);       // mono
+  v.setUint32(24, sampleRate, true);
+  v.setUint32(28, sampleRate * 2, true); // byte rate
+  v.setUint16(32, 2, true);       // block align
+  v.setUint16(34, 16, true);      // bits/sample
+  ws4(36, 'data'); v.setUint32(40, dataBytes, true);
+  new Uint8Array(buf).set(new Uint8Array(int16.buffer), 44);
+  return buf;
 }
 
 btn.addEventListener('mousedown', startRec);
@@ -147,34 +167,67 @@ btn.addEventListener('touchend', stopRec);
 
 async function startRec(e) {
   e.preventDefault();
-  if (btn.disabled) return;
-  if (!audioCtx) audioCtx = new AudioContext({ sampleRate });
-  const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-  chunks = [];
-  mimeType = pickMime();
-  const opts = mimeType ? { mimeType } : {};
-  recorder = new MediaRecorder(stream, opts);
-  recorder.ondataavailable = ev => { if (ev.data.size > 0) chunks.push(ev.data); };
-  recorder.start(100);
+  if (btn.disabled || isRecording) return;
+
+  recStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true }, video: false });
+
+  // Use the stream's native sample rate so the browser doesn't need to resample
+  recCtx = new AudioContext();
+  recSource = recCtx.createMediaStreamSource(recStream);
+
+  // ScriptProcessor is deprecated but universally supported; AudioWorklet needs HTTPS origin
+  const bufSize = 4096;
+  recNode = recCtx.createScriptProcessor(bufSize, 1, 1);
+  pcmChunks = [];
+  isRecording = true;
+
+  recNode.onaudioprocess = (ev) => {
+    if (!isRecording) return;
+    const data = ev.inputBuffer.getChannelData(0);
+    pcmChunks.push(new Float32Array(data));
+  };
+
+  recSource.connect(recNode);
+  recNode.connect(recCtx.destination); // must be connected to fire
+
   btn.textContent = '🔴 Release to send';
   btn.classList.add('recording');
   status.textContent = 'Recording…';
 }
 
 async function stopRec() {
-  if (!recorder || recorder.state === 'inactive') return;
-  const usedMime = recorder.mimeType || mimeType || 'audio/webm';
-  recorder.stop();
-  recorder.stream.getTracks().forEach(t => t.stop());
+  if (!isRecording) return;
+  isRecording = false;
+
+  recNode.disconnect();
+  recSource.disconnect();
+  recStream.getTracks().forEach(t => t.stop());
+
+  const sr = recCtx.sampleRate;
+  await recCtx.close();
+
   btn.textContent = '🎙 Hold to speak';
   btn.classList.remove('recording');
   btn.disabled = true;
   status.textContent = 'Processing…';
-  await new Promise(r => recorder.onstop = r);
-  const blob = new Blob(chunks, { type: usedMime });
-  // Send mime type as text frame first so server knows the format
-  ws.send(JSON.stringify({ type: 'audio_mime', mime: usedMime }));
-  ws.send(blob);
+
+  // Concatenate all captured chunks
+  const total = pcmChunks.reduce((s, c) => s + c.length, 0);
+  const merged = new Float32Array(total);
+  let off = 0;
+  for (const c of pcmChunks) { merged.set(c, off); off += c.length; }
+
+  if (merged.length < sr * 0.2) {
+    // Less than 200 ms — too short
+    addMsg('Recording too short, please hold longer.', 'system');
+    btn.disabled = false;
+    status.textContent = 'Ready';
+    return;
+  }
+
+  const wav = buildWav(merged, sr);
+  ws.send(JSON.stringify({ type: 'audio_wav', sample_rate: sr }));
+  ws.send(wav);
 }
 </script>
 </body>
@@ -182,29 +235,9 @@ async function stopRec() {
 """
 
 
-async def _to_wav(audio_bytes: bytes, mime: str = "") -> bytes:
-    """Convert any browser audio format to 16 kHz mono PCM WAV via ffmpeg."""
-    log.info("ffmpeg input: %d bytes, mime=%r", len(audio_bytes), mime)
-    proc = await asyncio.create_subprocess_exec(
-        "ffmpeg", "-y", "-i", "pipe:0",
-        "-f", "wav", "-ar", "16000", "-ac", "1", "pipe:1",
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    wav, stderr = await proc.communicate(audio_bytes)
-    log.info("ffmpeg output: %d bytes WAV (rc=%d)", len(wav), proc.returncode)
-    if proc.returncode != 0 or len(wav) < 100:
-        log.error("ffmpeg stderr: %s", stderr.decode(errors="replace")[-800:])
-    return wav
-
-
-async def transcribe(audio_bytes: bytes, mime: str = "") -> str:
-    """Convert browser audio to WAV then transcribe with Deepgram REST API."""
-    wav = await _to_wav(audio_bytes, mime)
-    if len(wav) < 100:
-        raise ValueError(f"ffmpeg produced no output ({len(wav)} bytes) — audio too short or unsupported format: {mime!r}")
-    log.info("Sending %d bytes WAV to Deepgram", len(wav))
+async def transcribe(wav_bytes: bytes) -> str:
+    """Transcribe WAV bytes (built client-side) with Deepgram REST API."""
+    log.info("Sending %d bytes WAV to Deepgram", len(wav_bytes))
     async with httpx.AsyncClient(timeout=30) as client:
         r = await client.post(
             "https://api.deepgram.com/v1/listen?model=nova-2&smart_format=true",
@@ -212,7 +245,7 @@ async def transcribe(audio_bytes: bytes, mime: str = "") -> str:
                 "Authorization": f"Token {DEEPGRAM_API_KEY}",
                 "Content-Type": "audio/wav",
             },
-            content=wav,
+            content=wav_bytes,
         )
         log.info("Deepgram %d: %s", r.status_code, r.text[:300])
         r.raise_for_status()
@@ -262,28 +295,29 @@ async def index():
 async def ws_endpoint(ws: WebSocket):
     await ws.accept()
     history = [{"role": "system", "content": SYSTEM_PROMPT}]
-    pending_mime = ""
+    pending_meta: dict = {}
     try:
         while True:
             msg = await ws.receive()
-            # Text frame: mime hint sent just before binary audio
             if msg["type"] == "websocket.receive" and msg.get("text"):
                 payload = json.loads(msg["text"])
-                if payload.get("type") == "audio_mime":
-                    pending_mime = payload.get("mime", "")
-                    log.info("Browser reported mime: %s", pending_mime)
+                if payload.get("type") in ("audio_wav", "audio_mime"):
+                    pending_meta = payload
+                    log.info("Audio meta: %s", payload)
                 continue
             data = msg.get("bytes") or b""
             if not data:
                 continue
 
-            mime = pending_mime
-            pending_mime = ""
+            meta = pending_meta
+            pending_meta = {}
+            log.info("Received %d bytes audio (meta=%s)", len(data), meta)
 
-            # 1. Transcribe
+            # 1. Transcribe — data is a client-built WAV
             try:
-                transcript = await transcribe(data, mime)
+                transcript = await transcribe(data)
             except Exception as e:
+                log.exception("STT error")
                 await ws.send_text(json.dumps({"type": "error", "text": f"STT failed: {e}"}))
                 continue
 
@@ -298,6 +332,7 @@ async def ws_endpoint(ws: WebSocket):
             try:
                 reply = await llm_reply(history)
             except Exception as e:
+                log.exception("LLM error")
                 await ws.send_text(json.dumps({"type": "error", "text": f"LLM failed: {e}"}))
                 continue
 
@@ -308,6 +343,7 @@ async def ws_endpoint(ws: WebSocket):
             try:
                 await stream_tts(reply, ws)
             except Exception as e:
+                log.exception("TTS error")
                 await ws.send_text(json.dumps({"type": "error", "text": f"TTS failed: {e}"}))
 
             await ws.send_text(json.dumps({"type": "done"}))
