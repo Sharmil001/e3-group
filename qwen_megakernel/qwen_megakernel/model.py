@@ -196,9 +196,14 @@ def load_talker_weights(
         )
 
     layer_weights = _extract_layer_blob(state, layer_prefix)
-    embed_weight = state[embed_key].to(torch.bfloat16).contiguous()
-    final_norm_weight = state[norm_key].to(torch.bfloat16).contiguous()
     lm_head_weight = state[lm_head_key].to(torch.bfloat16).contiguous()
+    # embed_tokens is tied to lm_head in the Qwen3-TTS checkpoint and only
+    # saved once in safetensors — fall back to a clone of lm_head when absent.
+    if embed_key in state:
+        embed_weight = state[embed_key].to(torch.bfloat16).contiguous()
+    else:
+        embed_weight = lm_head_weight.clone()
+    final_norm_weight = state[norm_key].to(torch.bfloat16).contiguous()
 
     # Resolve rope_theta + vocab from config.json
     cfg_path = os.path.join(local_dir, "config.json")
