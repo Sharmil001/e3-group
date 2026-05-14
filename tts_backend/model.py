@@ -214,12 +214,16 @@ class _HFSwapTTS:
             state["next_token"] = int(tok)
             # Code predictor expects shape [B, T, H] in bf16.
             hidden_btH = hidden.to(torch.bfloat16).view(1, 1, -1)
+            # Return all standard BaseModelOutputWithPast fields so qwen_tts
+            # talker.forward can splat them without AttributeError. Fields we
+            # don't compute (attentions etc.) are None — qwen_tts passes them
+            # through without inspecting values.
             return SimpleNamespace(
                 last_hidden_state=hidden_btH,
-                # qwen_tts accesses outputs.hidden_states (not last_hidden_state)
-                # in its talker forward to feed the code predictor.
                 hidden_states=hidden_btH,
                 past_key_values=past_key_values,
+                attentions=None,
+                cross_attentions=None,
                 _megakernel_next_token=tok,
             )
 
