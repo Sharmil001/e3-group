@@ -162,20 +162,27 @@ async function stopRec() {
 
 async def _webm_to_wav(audio_bytes: bytes) -> bytes:
     """Convert WebM/Opus from MediaRecorder to 16 kHz mono PCM WAV via ffmpeg."""
+    log.info("ffmpeg input: %d bytes of WebM", len(audio_bytes))
     proc = await asyncio.create_subprocess_exec(
         "ffmpeg", "-y", "-i", "pipe:0",
         "-f", "wav", "-ar", "16000", "-ac", "1", "pipe:1",
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
     )
-    wav, _ = await proc.communicate(audio_bytes)
+    wav, stderr = await proc.communicate(audio_bytes)
+    log.info("ffmpeg output: %d bytes of WAV (rc=%d)", len(wav), proc.returncode)
+    if proc.returncode != 0:
+        log.error("ffmpeg stderr: %s", stderr.decode(errors="replace")[-500:])
     return wav
 
 
 async def transcribe(audio_bytes: bytes) -> str:
     """Convert WebM to WAV then send to Deepgram REST API."""
     wav = await _webm_to_wav(audio_bytes)
+    if len(wav) < 100:
+        raise ValueError(f"ffmpeg produced no output ({len(wav)} bytes) — audio too short or corrupt")
+    log.info("Sending %d bytes WAV to Deepgram", len(wav))
     async with httpx.AsyncClient(timeout=30) as client:
         r = await client.post(
             "https://api.deepgram.com/v1/listen?model=nova-2&smart_format=true",
@@ -185,6 +192,7 @@ async def transcribe(audio_bytes: bytes) -> str:
             },
             content=wav,
         )
+        log.info("Deepgram response: %d — %s", r.status_code, r.text[:300])
         r.raise_for_status()
         data = r.json()
         return data["results"]["channels"][0]["alternatives"][0]["transcript"]
