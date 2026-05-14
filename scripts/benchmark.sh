@@ -24,7 +24,7 @@ OUT="${BENCH_OUT:-bench_results.md}"
     echo
     echo "## 1. Megakernel throughput (talker weights)"
     echo '```'
-    LDG_VOCAB_SIZE=2052 python -m benchmarks.throughput --model talker --tokens 100 --runs 20
+    LDG_VOCAB_SIZE=3072 python -m benchmarks.throughput --model talker --tokens 100 --runs 20
     echo '```'
     echo
     echo "## 2. Megakernel throughput (base Qwen3-0.6B, sanity)"

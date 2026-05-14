@@ -416,6 +416,13 @@ class TestSourceCodePatterns(unittest.TestCase):
             "silence ref_audio is no longer a (array, sr) tuple — qwen_tts will ValueError",
         )
 
+    def test_run_server_uses_correct_vocab_size(self):
+        src = self._src("scripts/run_server.sh")
+        self.assertNotIn("LDG_VOCAB_SIZE:-2052", src,
+                         "run_server.sh sets LDG_VOCAB_SIZE=2052 but talker vocab is 3072 — kernel buffer overflow → CUDA assert")
+        self.assertIn("LDG_VOCAB_SIZE:-3072", src,
+                      "run_server.sh must set LDG_VOCAB_SIZE=3072 to match talker lm_head shape")
+
     def test_manual_tts_pre_registers_qwen_tts(self):
         src = self._src("tts_backend/model.py")
         self.assertIn("import qwen_tts", src,

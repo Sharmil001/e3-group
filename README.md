@@ -18,7 +18,7 @@ The talker decoder inside `Qwen/Qwen3-TTS-12Hz-0.6B-Base` is **structurally iden
 
 Three minimal deltas vs upstream `qwen_megakernel`:
 
-1. **Configurable vocab size** ([qwen_megakernel/csrc/kernel.cu](qwen_megakernel/csrc/kernel.cu), [qwen_megakernel/qwen_megakernel/build.py](qwen_megakernel/qwen_megakernel/build.py)): `LDG_VOCAB_SIZE` is now a `-D` macro, default 151936 (base) or 2052 (talker). Override at build time with `LDG_VOCAB_SIZE=2052`.
+1. **Configurable vocab size** ([qwen_megakernel/csrc/kernel.cu](qwen_megakernel/csrc/kernel.cu), [qwen_megakernel/qwen_megakernel/build.py](qwen_megakernel/qwen_megakernel/build.py)): `LDG_VOCAB_SIZE` is now a `-D` macro, default 151936 (base) or 3072 (talker). Override at build time with `LDG_VOCAB_SIZE=3072`.
 2. **Hidden-state export** ([qwen_megakernel/qwen_megakernel/model.py](qwen_megakernel/qwen_megakernel/model.py)): `Decoder.step_with_hidden(token) -> (next_token, hidden_fp32[1024])`. The kernel already writes the post-final-RMSNorm hidden state into the `normalized` scratch tensor; we just clone it. Zero kernel-code changes for this one.
 3. **Talker weight loader** (same file): `load_talker_weights()` auto-detects `talker.model.*` vs `model.*` prefixes in the Qwen3-TTS snapshot, reads `rope_theta` and `vocab_size` from `config.json`, and untying `lm_head` from `embed_tokens`. RoPE uses the standard 1D cos/sin tables — MRoPE [24,20,20] collapses to 1D RoPE during pure-audio autoregressive decode because all three position components advance together. See [Risks](#risks-and-honest-caveats) below.
 

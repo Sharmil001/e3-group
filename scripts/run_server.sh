@@ -10,7 +10,7 @@ cd "$REPO_ROOT"
 [[ -d .venv ]] && source .venv/bin/activate
 
 export PYTHONPATH="$REPO_ROOT/qwen_megakernel:$REPO_ROOT:${PYTHONPATH:-}"
-export LDG_VOCAB_SIZE="${LDG_VOCAB_SIZE:-2052}"
+export LDG_VOCAB_SIZE="${LDG_VOCAB_SIZE:-3072}"
 
 export TTS_HOST="${TTS_HOST:-0.0.0.0}"
 export TTS_PORT="${TTS_PORT:-8765}"
