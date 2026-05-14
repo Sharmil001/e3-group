@@ -217,8 +217,8 @@ async function stopRec() {
   let off = 0;
   for (const c of pcmChunks) { merged.set(c, off); off += c.length; }
 
-  if (merged.length < sr * 0.2) {
-    // Less than 200 ms — too short
+  if (merged.length < sr * 0.05) {
+    // Less than 50 ms — definitely nothing
     addMsg('Recording too short, please hold longer.', 'system');
     btn.disabled = false;
     status.textContent = 'Ready';
