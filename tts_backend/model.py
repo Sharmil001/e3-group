@@ -252,15 +252,13 @@ class _HFSwapTTS:
 
         stream_owner = self.wrapper or self.model
 
-        # qwen_tts >=0.1.1 exposes generate_voice_clone (no reference audio
-        # required) and generate_custom_voice (requires a speaker name).
-        # generate_voice_clone with non_streaming_mode=False (the default)
-        # returns a generator; each iteration yields (List[np.ndarray], sr).
-        if hasattr(stream_owner, "generate_voice_clone"):
-            kw: dict = dict(text=text, non_streaming_mode=False)
-            if cfg.voice_clone_audio is not None:
-                kw["ref_audio"] = cfg.voice_clone_audio
-                kw["ref_text"] = cfg.voice_clone_text or ""
+        # qwen_tts >=0.1.1: generate_voice_clone REQUIRES ref_audio or
+        # voice_clone_prompt. When no reference is supplied use
+        # generate_custom_voice with a built-in speaker instead.
+        if cfg.voice_clone_audio is not None and hasattr(stream_owner, "generate_voice_clone"):
+            kw: dict = dict(text=text, non_streaming_mode=False,
+                            ref_audio=cfg.voice_clone_audio,
+                            ref_text=cfg.voice_clone_text or "")
             gen = stream_owner.generate_voice_clone(**kw)
         elif hasattr(stream_owner, "generate_custom_voice"):
             speakers = list(stream_owner.get_supported_speakers() or [])
