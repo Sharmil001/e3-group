@@ -250,38 +250,50 @@ class _HFSwapTTS:
         if hasattr(self, "_patch_state"):
             self._patch_state["new_stream"] = True
 
-        kwargs = dict(
-            text=text,
-            language="Auto",
-            emit_every_frames=cfg.emit_every_frames,
-            decode_window_frames=cfg.decode_window_frames,
-            overlap_samples=cfg.overlap_samples,
-        )
         stream_owner = self.wrapper or self.model
-        if cfg.voice_clone_audio is not None:
-            kwargs["voice_clone_prompt"] = stream_owner.create_voice_clone_prompt(
-                ref_audio=cfg.voice_clone_audio,
-                ref_text=cfg.voice_clone_text or "",
-            )
-            stream_fn = stream_owner.stream_generate_voice_clone
-        elif hasattr(stream_owner, "stream_generate"):
-            stream_fn = stream_owner.stream_generate
+
+        # qwen_tts >=0.1.1 exposes generate_voice_clone (no reference audio
+        # required) and generate_custom_voice (requires a speaker name).
+        # generate_voice_clone with non_streaming_mode=False (the default)
+        # returns a generator; each iteration yields (List[np.ndarray], sr).
+        if hasattr(stream_owner, "generate_voice_clone"):
+            kw: dict = dict(text=text, non_streaming_mode=False)
+            if cfg.voice_clone_audio is not None:
+                kw["ref_audio"] = cfg.voice_clone_audio
+                kw["ref_text"] = cfg.voice_clone_text or ""
+            gen = stream_owner.generate_voice_clone(**kw)
+        elif hasattr(stream_owner, "generate_custom_voice"):
+            speakers = list(stream_owner.get_supported_speakers() or [])
+            kw = dict(text=text, speaker=speakers[0] if speakers else "Chelsie",
+                      non_streaming_mode=False)
+            gen = stream_owner.generate_custom_voice(**kw)
         elif hasattr(stream_owner, "stream_generate_voice_clone"):
-            kwargs["voice_clone_prompt"] = _default_voice_prompt(stream_owner)
-            stream_fn = stream_owner.stream_generate_voice_clone
+            # Legacy upstream API
+            kw = dict(
+                text=text, language="Auto",
+                emit_every_frames=cfg.emit_every_frames,
+                decode_window_frames=cfg.decode_window_frames,
+                overlap_samples=cfg.overlap_samples,
+            )
+            if cfg.voice_clone_audio is not None:
+                kw["voice_clone_prompt"] = stream_owner.create_voice_clone_prompt(
+                    ref_audio=cfg.voice_clone_audio, ref_text=cfg.voice_clone_text or ""
+                )
+            else:
+                kw["voice_clone_prompt"] = _default_voice_prompt(stream_owner)
+            for chunk, _sr in stream_owner.stream_generate_voice_clone(**kw):
+                yield np.asarray(chunk, dtype=np.float32).reshape(-1)
+            return
         else:
             raise RuntimeError(
-                "Loaded Qwen3-TTS object does not expose a streaming API. "
-                "Install the Qwen3-TTS reference package/fork that provides "
-                "`Qwen3TTSModel.stream_generate_voice_clone`."
+                "Loaded Qwen3-TTS object does not expose a generation API. "
+                f"Available: {[m for m in dir(stream_owner) if not m.startswith('_')]}"
             )
 
-        for chunk, sr in stream_fn(**kwargs):
-            arr = np.asarray(chunk, dtype=np.float32).reshape(-1)
-            if sr != SAMPLE_RATE:
-                # Upstream is fixed at 24 kHz; warn but pass through
-                pass
-            yield arr
+        for audio_batch, _sr in gen:
+            batch = audio_batch if isinstance(audio_batch, (list, tuple)) else [audio_batch]
+            for chunk in batch:
+                yield np.asarray(chunk, dtype=np.float32).reshape(-1)
 
 
 def _default_voice_prompt(model):
