@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 
@@ -82,7 +83,11 @@ async def bot(runner_args) -> None:
 
     @transport.event_handler("on_client_connected")
     async def on_client_connected(transport, client):
-        await task.queue_frames([LLMMessagesAppendFrame([{"role": "user", "content": "Say hello briefly."}])])
+        await asyncio.sleep(1)
+        await task.queue_frames([LLMMessagesAppendFrame(
+            messages=[{"role": "user", "content": "Say hello briefly."}],
+            run_llm=True,
+        )])
 
     runner = PipelineRunner(handle_sigint=False)
     await runner.run(task)

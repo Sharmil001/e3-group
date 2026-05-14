@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import uuid
@@ -11,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 
 from aiortc import RTCIceServer
+from pipecat.frames.frames import LLMMessagesAppendFrame
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
@@ -79,6 +81,15 @@ async def run_bot(webrtc_connection: SmallWebRTCConnection) -> None:
     ])
 
     task = PipelineTask(pipeline, params=PipelineParams(audio_out_sample_rate=24000))
+
+    @transport.event_handler("on_client_connected")
+    async def on_client_connected(transport, client):
+        await asyncio.sleep(1)
+        await task.queue_frames([LLMMessagesAppendFrame(
+            messages=[{"role": "user", "content": "Say hello briefly."}],
+            run_llm=True,
+        )])
+
     runner = PipelineRunner(handle_sigint=False)
     await runner.run(task)
 
