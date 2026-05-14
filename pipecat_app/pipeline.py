@@ -1,43 +1,38 @@
-"""Pipecat voice-agent pipeline:
+"""Pipecat voice-agent pipeline (Pipecat 1.1.0).
 
-    transport.input  -> STT  -> LLM  -> MegakernelTTSService -> transport.output
+Uses the pipecat runner pattern: define a `bot(runner_args)` function and
+let `pipecat.runner.run.main` handle server setup, WebRTC signalling, and
+transport lifecycle.
 
-Default transport: Daily.co WebRTC (works in any browser; just need a room URL
-+ token). Fall back to a local PipeCat WebRTC peer if `--transport local` is
-passed.
-
-Default services (all swappable via env / CLI):
-    STT  : Deepgram (low-latency hosted; alternatives: Whisper, AssemblyAI)
-    LLM  : OpenAI gpt-4o-mini (alternatives: Anthropic, local Ollama)
-    TTS  : MegakernelTTSService (our backend)
+Transports supported:
+    webrtc  — SmallWebRTC (prebuilt browser UI at /client/)
+    daily   — Daily.co WebRTC room (needs DAILY_ROOM_URL + DAILY_TOKEN env vars)
 
 Required env vars:
-    DAILY_ROOM_URL         (when --transport daily)
-    DAILY_TOKEN            (when --transport daily)
-    DEEPGRAM_API_KEY       (for the default STT)
-    OPENAI_API_KEY         (for the default LLM)
-    TTS_WS_URL             (default ws://localhost:8765/tts)
+    DEEPGRAM_API_KEY
+    OPENAI_API_KEY
+    TTS_WS_URL            (default ws://localhost:8765/tts)
 
-Run:
-    python -m pipecat_app.pipeline                 # daily transport (default)
-    python -m pipecat_app.pipeline --transport local
+    # daily only:
+    DAILY_ROOM_URL
+    DAILY_TOKEN
+
+Run (WebRTC on mapped external port 8080 → Vast.ai 33868):
+    python -m pipecat_app.pipeline --transport webrtc --host 0.0.0.0 --port 8080
+Run (Daily):
+    python -m pipecat_app.pipeline --transport daily
 """
 
 from __future__ import annotations
 
-import argparse
-import asyncio
 import logging
 import os
-import sys
-from typing import Any
 
-from pipecat.audio.vad.silero import SileroVADAnalyzer
-from pipecat.frames.frames import EndFrame
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
-from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
+from pipecat.processors.aggregators.llm_context import LLMContext
+from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair
 from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.openai.llm import OpenAILLMService
 
@@ -45,8 +40,10 @@ from pipecat_app.service import MegakernelTTSService
 
 
 log = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
-
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
 
 SYSTEM_PROMPT = (
     "You are a helpful, concise voice assistant. Keep replies under two short"
@@ -54,70 +51,53 @@ SYSTEM_PROMPT = (
 )
 
 
-def _build_transport(kind: str) -> Any:
-    if kind == "daily":
-        from pipecat.transports.services.daily import DailyParams, DailyTransport
+async def bot(runner_args) -> None:  # type: ignore[type-arg]
+    """Entry point called by the pipecat runner for each connected client."""
+    from pipecat.runner.types import DailyRunnerArguments, SmallWebRTCRunnerArguments
 
-        room_url = os.environ["DAILY_ROOM_URL"]
-        token = os.environ["DAILY_TOKEN"]
-        return DailyTransport(
-            room_url,
-            token,
+    # ── Transport ─────────────────────────────────────────────────────────────
+    if isinstance(runner_args, SmallWebRTCRunnerArguments):
+        from pipecat.transports.base_transport import TransportParams
+        from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
+
+        transport = SmallWebRTCTransport(
+            webrtc_connection=runner_args.webrtc_connection,
+            params=TransportParams(
+                audio_in_enabled=True,
+                audio_out_enabled=True,
+                audio_out_sample_rate=24000,
+            ),
+        )
+    elif isinstance(runner_args, DailyRunnerArguments):
+        from pipecat.transports.daily.transport import DailyParams, DailyTransport
+
+        transport = DailyTransport(
+            runner_args.room_url,
+            runner_args.token,
             "Megakernel Voice Agent",
             DailyParams(
                 audio_in_enabled=True,
                 audio_out_enabled=True,
                 audio_out_sample_rate=24000,
-                vad_enabled=True,
-                vad_analyzer=SileroVADAnalyzer(),
-                transcription_enabled=False,
             ),
         )
-    if kind == "local":
-        # Local SmallWebRTC transport for browser-based testing without Daily.
-        from pipecat.transports.network.small_webrtc import (
-            SmallWebRTCConnection,
-            SmallWebRTCTransport,
-            TransportParams,
-        )
+    else:
+        raise ValueError(f"Unknown runner args type: {type(runner_args)}")
 
-        return SmallWebRTCTransport(
-            connection=SmallWebRTCConnection(host="0.0.0.0", port=7860),
-            params=TransportParams(
-                audio_in_enabled=True,
-                audio_out_enabled=True,
-                audio_out_sample_rate=24000,
-                vad_enabled=True,
-                vad_analyzer=SileroVADAnalyzer(),
-            ),
-        )
-    raise ValueError(f"unknown transport: {kind!r}")
-
-
-async def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--transport",
-        choices=("daily", "local"),
-        default=os.getenv("PIPECAT_TRANSPORT", "daily"),
-    )
-    parser.add_argument(
-        "--tts-url", default=os.getenv("TTS_WS_URL", "ws://localhost:8765/tts")
-    )
-    args = parser.parse_args()
-
-    transport = _build_transport(args.transport)
+    # ── Services ──────────────────────────────────────────────────────────────
+    tts_url = os.getenv("TTS_WS_URL", "ws://localhost:8765/tts")
 
     stt = DeepgramSTTService(api_key=os.environ["DEEPGRAM_API_KEY"])
     llm = OpenAILLMService(
         api_key=os.environ["OPENAI_API_KEY"],
         model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
     )
-    context = OpenAILLMContext(messages=[{"role": "system", "content": SYSTEM_PROMPT}])
-    ctx_aggr = llm.create_context_aggregator(context)
+    tts = MegakernelTTSService(url=tts_url, sample_rate=24000)
 
-    tts = MegakernelTTSService(url=args.tts_url, sample_rate=24000)
+    context = LLMContext(messages=[{"role": "system", "content": SYSTEM_PROMPT}])
+    ctx_aggr = LLMContextAggregatorPair(context)
 
+    # ── Pipeline ──────────────────────────────────────────────────────────────
     pipeline = Pipeline(
         [
             transport.input(),
@@ -129,30 +109,17 @@ async def main() -> None:
             ctx_aggr.assistant(),
         ]
     )
+
     task = PipelineTask(
         pipeline,
-        params=PipelineParams(
-            allow_interruptions=True,
-            audio_out_sample_rate=24000,
-        ),
+        params=PipelineParams(audio_out_sample_rate=24000),
     )
 
-    @transport.event_handler("on_client_connected")  # type: ignore[misc]
-    async def on_connect(transport, client):
-        log.info("Client connected: %s", client)
-        await task.queue_frames([ctx_aggr.user().get_context_frame()])
-
-    @transport.event_handler("on_client_disconnected")  # type: ignore[misc]
-    async def on_disconnect(transport, client):
-        log.info("Client disconnected")
-        await task.queue_frames([EndFrame()])
-
-    runner = PipelineRunner()
+    runner = PipelineRunner(handle_sigint=False)
     await runner.run(task)
 
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        sys.exit(130)
+    from pipecat.runner.run import main
+
+    main()
