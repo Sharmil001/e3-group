@@ -262,7 +262,7 @@ class _HFSwapTTS:
                 ref = cfg.voice_clone_audio
                 ref_text = cfg.voice_clone_text or ""
             else:
-                ref = np.zeros(int(0.5 * SAMPLE_RATE), dtype=np.float32)
+                ref = (np.zeros(int(0.5 * SAMPLE_RATE), dtype=np.float32), SAMPLE_RATE)
                 ref_text = " "
             kw: dict = dict(text=text, ref_audio=ref, ref_text=ref_text,
                             non_streaming_mode=False)
