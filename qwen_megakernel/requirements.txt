@@ -1,0 +1,7 @@
+torch>=2.0.0
+transformers>=4.45.0
+triton>=2.2.0
+ninja
+accelerate
+safetensors>=0.4.5
+huggingface-hub>=0.24.0
