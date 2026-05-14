@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import tempfile
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Iterator, Optional
 
 import numpy as np
+import soundfile as sf
 import torch
 
 SAMPLE_RATE = 24000
@@ -123,8 +126,6 @@ class _HFSwapTTS:
         )
 
     def _patch_backbone(self, talker) -> None:
-        from types import SimpleNamespace
-
         megakernel = self.talker
         state = {"new_stream": True, "next_token": 0}
         _orig_forward = talker.model.forward
@@ -243,10 +244,6 @@ class _HFSwapTTS:
 
 
 def _silence_voice_prompt(model):
-    import tempfile
-
-    import soundfile as sf
-
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
         sf.write(
             f.name, np.zeros(int(0.5 * SAMPLE_RATE), dtype=np.float32), SAMPLE_RATE

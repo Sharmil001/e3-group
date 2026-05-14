@@ -13,6 +13,8 @@ import json
 import os
 import time
 
+import websockets
+
 from benchmarks._common import print_table, summarize
 
 DEFAULT_TEXTS = [
@@ -51,8 +53,6 @@ async def _bench_local(args) -> list[float]:
 
 
 async def _bench_ws(args) -> list[float]:
-    import websockets
-
     samples = []
     async with websockets.connect(args.url, max_size=2**24) as ws:
         for _ in range(args.warmup):

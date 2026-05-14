@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import AsyncIterator, Optional
 
 import numpy as np
+import soundfile as sf
 
 from tts_backend.model import SAMPLE_RATE, TTSConfig, TTSEngine
 
@@ -109,8 +110,6 @@ class _ErrorChunk:
 
 
 def load_reference_audio(path: str, target_sr: int = SAMPLE_RATE) -> np.ndarray:
-    import soundfile as sf
-
     audio, sr = sf.read(path, dtype="float32", always_2d=False)
     if audio.ndim == 2:
         audio = audio.mean(axis=1)

@@ -9,8 +9,13 @@ from pipecat.pipeline.task import PipelineParams, PipelineTask
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.aggregators.llm_response import LLMFullResponseAggregator
 from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair
+from pipecat.runner.run import main
+from pipecat.runner.types import DailyRunnerArguments, SmallWebRTCRunnerArguments
 from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.openai.llm import OpenAILLMService
+from pipecat.transports.base_transport import TransportParams
+from pipecat.transports.daily.transport import DailyParams, DailyTransport
+from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
 
 from pipecat_app.service import MegakernelTTSService
 
@@ -27,12 +32,7 @@ SYSTEM_PROMPT = (
 
 
 async def bot(runner_args) -> None:
-    from pipecat.runner.types import DailyRunnerArguments, SmallWebRTCRunnerArguments
-
     if isinstance(runner_args, SmallWebRTCRunnerArguments):
-        from pipecat.transports.base_transport import TransportParams
-        from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
-
         transport = SmallWebRTCTransport(
             webrtc_connection=runner_args.webrtc_connection,
             params=TransportParams(
@@ -42,8 +42,6 @@ async def bot(runner_args) -> None:
             ),
         )
     elif isinstance(runner_args, DailyRunnerArguments):
-        from pipecat.transports.daily.transport import DailyParams, DailyTransport
-
         transport = DailyTransport(
             runner_args.room_url,
             runner_args.token,
@@ -88,6 +86,4 @@ async def bot(runner_args) -> None:
 
 
 if __name__ == "__main__":
-    from pipecat.runner.run import main
-
     main()

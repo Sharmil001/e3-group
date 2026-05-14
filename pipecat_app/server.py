@@ -11,6 +11,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 
 from aiortc import RTCIceServer
+from pipecat.pipeline.pipeline import Pipeline
+from pipecat.pipeline.runner import PipelineRunner
+from pipecat.pipeline.task import PipelineParams, PipelineTask
+from pipecat.processors.aggregators.llm_context import LLMContext
+from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair
+from pipecat.services.deepgram.stt import DeepgramSTTService
+from pipecat.services.openai.llm import OpenAILLMService
+from pipecat.transports.base_transport import TransportParams
 from pipecat.transports.smallwebrtc.connection import SmallWebRTCConnection
 from pipecat.transports.smallwebrtc.request_handler import (
     IceCandidate,
@@ -18,7 +26,10 @@ from pipecat.transports.smallwebrtc.request_handler import (
     SmallWebRTCRequest,
     SmallWebRTCRequestHandler,
 )
+from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
 from pipecat_ai_small_webrtc_prebuilt.frontend import SmallWebRTCPrebuiltUI
+
+from pipecat_app.service import MegakernelTTSService
 
 log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -39,18 +50,6 @@ AIORTC_ICE_SERVERS = [
 
 
 async def run_bot(webrtc_connection: SmallWebRTCConnection) -> None:
-    from pipecat.pipeline.pipeline import Pipeline
-    from pipecat.pipeline.runner import PipelineRunner
-    from pipecat.pipeline.task import PipelineParams, PipelineTask
-    from pipecat.processors.aggregators.llm_context import LLMContext
-    from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair
-    from pipecat.services.deepgram.stt import DeepgramSTTService
-    from pipecat.services.openai.llm import OpenAILLMService
-    from pipecat.transports.base_transport import TransportParams
-    from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
-
-    from pipecat_app.service import MegakernelTTSService
-
     transport = SmallWebRTCTransport(
         webrtc_connection=webrtc_connection,
         params=TransportParams(audio_in_enabled=True, audio_out_enabled=True, audio_out_sample_rate=24000),
