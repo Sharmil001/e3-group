@@ -310,7 +310,105 @@ class TestQwenTTSPreRegistration(unittest.TestCase):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 7. Basic import checks (CPU-only)
+# 7. Source-file content checks — read the REAL .py files and verify every fix
+#    is still present. These catch accidental reverts without needing a GPU.
+# ─────────────────────────────────────────────────────────────────────────────
+
+import os as _os
+_REPO = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+
+class TestSourceCodePatterns(unittest.TestCase):
+    """Read the actual source files and grep for the exact strings we fixed.
+
+    What this adds over the logic tests above:
+      - If someone accidentally reverts a fix in model.py, THESE tests fail.
+      - They test the real code, not a replica of the logic.
+
+    What they still can't cover (requires GPU):
+      - CUDA kernel actually executing
+      - qwen_tts monkey-patch intercepting the right call inside its loop
+      - Weight tensor shapes matching the kernel's compile-time vocab size
+      - Real audio being produced with correct EOS detection
+    """
+
+    def _src(self, rel_path: str) -> str:
+        with open(_os.path.join(_REPO, rel_path)) as f:
+            return f.read()
+
+    # ── qwen_megakernel/model.py ─────────────────────────────────────────────
+
+    def test_weight_loader_uses_codec_embedding_key(self):
+        src = self._src("qwen_megakernel/qwen_megakernel/model.py")
+        self.assertIn("talker.model.codec_embedding.weight", src,
+                      "Key name reverted — loader will KeyError on real checkpoint")
+
+    def test_weight_loader_uses_codec_head_not_lm_head(self):
+        src = self._src("qwen_megakernel/qwen_megakernel/model.py")
+        self.assertIn("talker.codec_head.weight", src,
+                      "lm_head key reverted — loader will KeyError on real checkpoint")
+
+    def test_weight_loader_loads_text_embed_key(self):
+        src = self._src("qwen_megakernel/qwen_megakernel/model.py")
+        self.assertIn("talker.model.text_embedding.weight", src,
+                      "text_embedding key absent — prefill will use codec embed for text tokens")
+
+    def test_decoder_stores_text_embed_weight_field(self):
+        src = self._src("qwen_megakernel/qwen_megakernel/model.py")
+        self.assertIn("_text_embed_weight", src,
+                      "Decoder._text_embed_weight field removed")
+
+    def test_prefill_selects_text_embed_when_available(self):
+        src = self._src("qwen_megakernel/qwen_megakernel/model.py")
+        self.assertIn(
+            "self._text_embed_weight if self._text_embed_weight is not None",
+            src,
+            "prefill() no longer selects text embed — will embed text tokens incorrectly",
+        )
+
+    def test_old_lm_head_key_not_used_as_lm_head_var(self):
+        """Old code had: lm_head_key = 'talker.lm_head.weight' — must be gone."""
+        src = self._src("qwen_megakernel/qwen_megakernel/model.py")
+        self.assertNotIn('"talker.lm_head.weight"', src,
+                         "Old broken lm_head key is back in the loader")
+
+    # ── tts_backend/model.py ─────────────────────────────────────────────────
+
+    def test_patched_forward_has_hidden_states(self):
+        src = self._src("tts_backend/model.py")
+        self.assertIn("hidden_states=hidden_btH", src,
+                      "hidden_states field removed from patched_forward SimpleNamespace")
+
+    def test_patched_forward_has_attentions_none(self):
+        src = self._src("tts_backend/model.py")
+        self.assertIn("attentions=None", src,
+                      "attentions=None removed — qwen_tts will AttributeError")
+
+    def test_patched_forward_has_cross_attentions_none(self):
+        src = self._src("tts_backend/model.py")
+        self.assertIn("cross_attentions=None", src,
+                      "cross_attentions=None removed — qwen_tts may AttributeError")
+
+    def test_stream_calls_generate_voice_clone(self):
+        src = self._src("tts_backend/model.py")
+        self.assertIn("generate_voice_clone", src,
+                      "stream() no longer calls generate_voice_clone")
+
+    def test_stream_passes_ref_audio_as_tuple(self):
+        src = self._src("tts_backend/model.py")
+        self.assertIn(
+            "np.zeros(int(0.5 * SAMPLE_RATE), dtype=np.float32), SAMPLE_RATE)",
+            src,
+            "silence ref_audio is no longer a (array, sr) tuple — qwen_tts will ValueError",
+        )
+
+    def test_manual_tts_pre_registers_qwen_tts(self):
+        src = self._src("tts_backend/model.py")
+        self.assertIn("import qwen_tts", src,
+                      "_ManualTTS no longer pre-registers qwen_tts — AutoModel will fail")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 8. Basic import checks (CPU-only)
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestImports(unittest.TestCase):
