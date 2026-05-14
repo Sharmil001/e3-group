@@ -179,11 +179,16 @@ def load_talker_weights(
         state.update(load_file(shard, device="cuda"))
 
     # Auto-detect prefix
+    text_embed_key: str | None = None
     if any(k.startswith("talker.model.layers.") for k in state):
+        # Qwen3-TTS full-model checkpoint: talker has separate text and codec
+        # embedding tables. Use codec_embedding for the audio-step path and
+        # text_embedding for the prefill path.
         layer_prefix = "talker.model.layers."
-        embed_key = "talker.model.embed_tokens.weight"
+        embed_key = "talker.model.codec_embedding.weight"
+        text_embed_key = "talker.model.text_embedding.weight"
         norm_key = "talker.model.norm.weight"
-        lm_head_key = "talker.lm_head.weight"
+        lm_head_key = "talker.codec_head.weight"
     elif any(k.startswith("model.layers.") for k in state):
         layer_prefix = "model.layers."
         embed_key = "model.embed_tokens.weight"
@@ -197,12 +202,12 @@ def load_talker_weights(
 
     layer_weights = _extract_layer_blob(state, layer_prefix)
     lm_head_weight = state[lm_head_key].to(torch.bfloat16).contiguous()
-    # embed_tokens is tied to lm_head in the Qwen3-TTS checkpoint and only
-    # saved once in safetensors — fall back to a clone of lm_head when absent.
-    if embed_key in state:
-        embed_weight = state[embed_key].to(torch.bfloat16).contiguous()
-    else:
-        embed_weight = lm_head_weight.clone()
+    embed_weight = state[embed_key].to(torch.bfloat16).contiguous() if embed_key in state else lm_head_weight.clone()
+    text_embed_weight = (
+        state[text_embed_key].to(torch.bfloat16).contiguous()
+        if text_embed_key and text_embed_key in state
+        else None
+    )
     final_norm_weight = state[norm_key].to(torch.bfloat16).contiguous()
 
     # Resolve rope_theta + vocab from config.json
@@ -225,6 +230,7 @@ def load_talker_weights(
 
     weights = dict(
         embed_weight=embed_weight,
+        text_embed_weight=text_embed_weight,
         layer_weights=layer_weights,
         final_norm_weight=final_norm_weight,
         lm_head_weight=lm_head_weight,
@@ -296,7 +302,8 @@ class Decoder:
         self._weights = weights
 
         # Model weights (read-only, shared across calls)
-        self._embed_weight = weights["embed_weight"]
+        self._embed_weight = weights["embed_weight"]  # codec embedding (audio step)
+        self._text_embed_weight = weights.get("text_embed_weight")  # text prefill; None for base model
         self._final_norm_weight = weights["final_norm_weight"]
         self._lm_head_weight = weights["lm_head_weight"]
         self._cos_table = weights["cos_table"]
@@ -404,9 +411,42 @@ class Decoder:
         return self._out_token.item(), hidden
 
     def prefill(self, token_ids: list[int]) -> None:
-        """Step through a prompt without keeping outputs (warm KV cache)."""
+        """Step through a prompt without keeping outputs (warm KV cache).
+
+        Uses text_embed_weight for token lookup when available (Qwen3-TTS talker
+        has separate text and codec embedding tables; text tokens go through
+        text_embedding, audio tokens through codec_embedding / embed_weight).
+        """
+        embed = self._text_embed_weight if self._text_embed_weight is not None else self._embed_weight
         for tid in token_ids:
-            self.step(int(tid))
+            _decode(
+                self._out_token,
+                int(tid),
+                embed,
+                self._layer_weights_packed,
+                self._final_norm_weight,
+                self._lm_head_weight,
+                self._cos_table,
+                self._sin_table,
+                self._k_cache,
+                self._v_cache,
+                self._hidden,
+                self._act,
+                self._res,
+                self._q,
+                self._k,
+                self._v,
+                self._attn_out,
+                self._mlp_inter,
+                self._norm_out,
+                self._bmax_vals,
+                self._bmax_idxs,
+                NUM_LAYERS,
+                self._position,
+                MAX_SEQ_LEN,
+                self._attn_scale,
+            )
+            self._position += 1
 
     def reset(self):
         self._position = 0
