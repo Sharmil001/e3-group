@@ -216,8 +216,10 @@ class _HFSwapTTS:
             hidden_btH = hidden.to(torch.bfloat16).view(1, 1, -1)
             return SimpleNamespace(
                 last_hidden_state=hidden_btH,
+                # qwen_tts accesses outputs.hidden_states (not last_hidden_state)
+                # in its talker forward to feed the code predictor.
+                hidden_states=hidden_btH,
                 past_key_values=past_key_values,
-                # Useful for debug / custom call sites.
                 _megakernel_next_token=tok,
             )
 
