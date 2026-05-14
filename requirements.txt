@@ -1,0 +1,25 @@
+# Root requirements: covers megakernel build deps + TTS backend + Pipecat app.
+# `torch` is intentionally NOT pinned here — install the cu128 wheel
+# explicitly before `pip install -r requirements.txt` (see scripts/setup.sh).
+
+# Megakernel
+transformers>=4.45.0
+ninja
+accelerate
+safetensors>=0.4.5
+huggingface-hub>=0.24.0
+
+# TTS backend
+qwen-tts>=0.1.1
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+websockets>=12.0
+numpy>=1.26
+soundfile>=0.12.1
+librosa>=0.10.2
+
+# Pipecat (voice agent)
+pipecat-ai[daily,deepgram,openai,silero,webrtc]>=0.0.55
+
+# Benchmarks / dev
+pytest>=8.0

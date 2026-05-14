@@ -1,0 +1,15 @@
+.venv
+__pycache__
+*.pyc
+*.pyo
+.git
+.gitignore
+.cursor
+.idea
+.vscode
+*.mp4
+*.wav
+*.flac
+bench_results.md
+demo.mp4
+qwen_megakernel/build

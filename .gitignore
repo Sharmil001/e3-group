@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.cursor/
+.idea/
+.vscode/
+bench_results.md
+demo.mp4
+*.wav
+!assets/*.wav
+qwen_megakernel/build/
