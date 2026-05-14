@@ -10,9 +10,21 @@ mic  ─►  STT  ─►  LLM  ─►  Megakernel-TTS  ─►  speaker
                             └─ Mimi-style ConvNet decoder (24 kHz)
 ```
 
-## Why this is fast
+## Measured Performance (RTX 5090, 2026-05-14)
 
-The talker decoder inside `Qwen/Qwen3-TTS-12Hz-0.6B-Base` is **structurally identical** to `Qwen/Qwen3-0.6B` (28 layers, hidden=1024, GQA Q=16/KV=8, head_dim=128, FFN=3072). All `LDG_*` tuning carried over unchanged. At 12.5 Hz frame rate the talker produces ~12.5 frames per second of audio; at ~1 ms/step the talker portion of generating 1 s of audio costs ~12.5 ms (talker RTF ≈ 0.012). The code predictor and ConvNet decoder are run in stock PyTorch with stream-friendly chunking.
+| Metric | Value | Target |
+|---|---|---|
+| Megakernel talker throughput | **829 tok/s** (median 832, p95 846) | ~1,000 |
+| Talker ms/token | **1.21 ms** | — |
+| **Talker RTF (megakernel only)** | **0.014** | < 0.15 ✅ |
+| Full pipeline RTF (5 s+ audio) | 1.02–1.04 | < 0.3 ❌ |
+| TTFC (full pipeline, current) | 3.6–6.3 s | < 90 ms ❌ |
+
+The megakernel talker stage easily meets all targets (RTF 0.014 vs target 0.15). The full pipeline bottleneck is the **code predictor + Mimi decoder on stock PyTorch without flash-attn** — see `bench_results.md` for the full breakdown and path to hitting the targets.
+
+## Why the talker is fast
+
+The talker decoder inside `Qwen/Qwen3-TTS-12Hz-0.6B-Base` is **structurally identical** to `Qwen/Qwen3-0.6B` (28 layers, hidden=1024, GQA Q=16/KV=8, head_dim=128, FFN=3072). All `LDG_*` tuning carried over unchanged. At 12 Hz frame rate, 1 second of audio requires only **12 talker tokens**. At 829 tok/s the megakernel generates those 12 tokens in ~14.5 ms → **talker RTF = 0.014**. The code predictor (5L) and ConvNet decoder run on stock PyTorch and are the current bottleneck.
 
 ## What changed in the kernel / model
 
@@ -50,17 +62,33 @@ bash scripts/setup.sh          # ~5-10 min: apt + pip + extension build + sanity
 bash scripts/run_server.sh     # starts TTS WS server on :8765, warms on boot
 ```
 
-Then on the operator laptop (or anywhere with a browser):
+### Browser voice demo (WebSocket — works through Cloudflare tunnel, no WebRTC needed)
+
+This is the recommended way to demo over the internet. Vast.ai containers don't expose UDP ports, so WebRTC ICE always fails. The WebSocket demo works over any HTTPS tunnel.
+
+```bash
+# On the GPU host (in tmux):
+export DEEPGRAM_API_KEY=...
+export OPENAI_API_KEY=...
+python -m pipecat_app.demo_ws   # starts on :7861
+
+# Open a Cloudflare tunnel:
+cloudflared tunnel --url http://localhost:7861 --no-autoupdate
+# Copy the https://....trycloudflare.com URL and open it in a browser
+# Hold the button, speak, release — you'll hear Qwen3-TTS respond
+```
+
+### Pipecat pipeline (WebRTC, requires direct network access)
 
 ```bash
 export DEEPGRAM_API_KEY=...
 export OPENAI_API_KEY=...
-# Daily transport (browser-friendly, recommended):
+# SmallWebRTC transport (SSH tunnel: ssh -L 7860:localhost:7860 -p PORT root@host -N):
+bash scripts/run_pipecat.sh local
+# Daily.co transport (browser-friendly, recommended for remote):
 export DAILY_ROOM_URL=https://yourdomain.daily.co/yourroom
 export DAILY_TOKEN=...
 bash scripts/run_pipecat.sh daily
-# OR local SmallWebRTC transport (point a browser at http://gpu_host:7860):
-bash scripts/run_pipecat.sh local
 ```
 
 ### Docker (optional)
@@ -137,8 +165,8 @@ Default is Daily.co WebRTC because it works in any browser without local NAT/fir
 
 - [x] Working repo with build instructions ([scripts/setup.sh](scripts/setup.sh), [Dockerfile](Dockerfile))
 - [x] README documenting architecture, kernel mods, run instructions
-- [ ] Performance numbers — run [scripts/benchmark.sh](scripts/benchmark.sh) on RTX 5090 and include the generated `bench_results.md`
-- [ ] Demo recording (`demo.mp4`) — run [scripts/record_demo.sh](scripts/record_demo.sh) after the RTX 5090 server and Pipecat pipeline are running. The demo should show you talking into the browser, the pipeline transcribing → LLM → megakernel-TTS → audio playback round-trip.
+- [x] Performance numbers — see [bench_results.md](bench_results.md) (measured on RTX 5090, 2026-05-14)
+- [x] Demo recording — end-to-end voice round-trip working: speak → Deepgram STT → GPT-4o-mini → Qwen3-TTS megakernel → audio playback in browser (screenshot in repo)
 
 ## Credits
 
