@@ -122,6 +122,23 @@ ws.onmessage = async (e) => {
 
 let recorder = null;
 let chunks = [];
+let mimeType = '';
+
+// Pick the best supported MIME type for this browser
+function pickMime() {
+  const candidates = [
+    'audio/webm;codecs=opus',
+    'audio/webm',
+    'audio/ogg;codecs=opus',
+    'audio/mp4;codecs=mp4a.40.2',
+    'audio/mp4',
+    '',
+  ];
+  for (const m of candidates) {
+    if (m === '' || MediaRecorder.isTypeSupported(m)) return m;
+  }
+  return '';
+}
 
 btn.addEventListener('mousedown', startRec);
 btn.addEventListener('touchstart', startRec, { passive: true });
@@ -134,7 +151,9 @@ async function startRec(e) {
   if (!audioCtx) audioCtx = new AudioContext({ sampleRate });
   const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
   chunks = [];
-  recorder = new MediaRecorder(stream, { mimeType: 'audio/webm;codecs=opus' });
+  mimeType = pickMime();
+  const opts = mimeType ? { mimeType } : {};
+  recorder = new MediaRecorder(stream, opts);
   recorder.ondataavailable = ev => { if (ev.data.size > 0) chunks.push(ev.data); };
   recorder.start(100);
   btn.textContent = '🔴 Release to send';
@@ -144,6 +163,7 @@ async function startRec(e) {
 
 async function stopRec() {
   if (!recorder || recorder.state === 'inactive') return;
+  const usedMime = recorder.mimeType || mimeType || 'audio/webm';
   recorder.stop();
   recorder.stream.getTracks().forEach(t => t.stop());
   btn.textContent = '🎙 Hold to speak';
@@ -151,7 +171,9 @@ async function stopRec() {
   btn.disabled = true;
   status.textContent = 'Processing…';
   await new Promise(r => recorder.onstop = r);
-  const blob = new Blob(chunks, { type: 'audio/webm' });
+  const blob = new Blob(chunks, { type: usedMime });
+  // Send mime type as text frame first so server knows the format
+  ws.send(JSON.stringify({ type: 'audio_mime', mime: usedMime }));
   ws.send(blob);
 }
 </script>
@@ -160,9 +182,9 @@ async function stopRec() {
 """
 
 
-async def _webm_to_wav(audio_bytes: bytes) -> bytes:
-    """Convert WebM/Opus from MediaRecorder to 16 kHz mono PCM WAV via ffmpeg."""
-    log.info("ffmpeg input: %d bytes of WebM", len(audio_bytes))
+async def _to_wav(audio_bytes: bytes, mime: str = "") -> bytes:
+    """Convert any browser audio format to 16 kHz mono PCM WAV via ffmpeg."""
+    log.info("ffmpeg input: %d bytes, mime=%r", len(audio_bytes), mime)
     proc = await asyncio.create_subprocess_exec(
         "ffmpeg", "-y", "-i", "pipe:0",
         "-f", "wav", "-ar", "16000", "-ac", "1", "pipe:1",
@@ -171,17 +193,17 @@ async def _webm_to_wav(audio_bytes: bytes) -> bytes:
         stderr=asyncio.subprocess.PIPE,
     )
     wav, stderr = await proc.communicate(audio_bytes)
-    log.info("ffmpeg output: %d bytes of WAV (rc=%d)", len(wav), proc.returncode)
-    if proc.returncode != 0:
-        log.error("ffmpeg stderr: %s", stderr.decode(errors="replace")[-500:])
+    log.info("ffmpeg output: %d bytes WAV (rc=%d)", len(wav), proc.returncode)
+    if proc.returncode != 0 or len(wav) < 100:
+        log.error("ffmpeg stderr: %s", stderr.decode(errors="replace")[-800:])
     return wav
 
 
-async def transcribe(audio_bytes: bytes) -> str:
-    """Convert WebM to WAV then send to Deepgram REST API."""
-    wav = await _webm_to_wav(audio_bytes)
+async def transcribe(audio_bytes: bytes, mime: str = "") -> str:
+    """Convert browser audio to WAV then transcribe with Deepgram REST API."""
+    wav = await _to_wav(audio_bytes, mime)
     if len(wav) < 100:
-        raise ValueError(f"ffmpeg produced no output ({len(wav)} bytes) — audio too short or corrupt")
+        raise ValueError(f"ffmpeg produced no output ({len(wav)} bytes) — audio too short or unsupported format: {mime!r}")
     log.info("Sending %d bytes WAV to Deepgram", len(wav))
     async with httpx.AsyncClient(timeout=30) as client:
         r = await client.post(
@@ -192,7 +214,7 @@ async def transcribe(audio_bytes: bytes) -> str:
             },
             content=wav,
         )
-        log.info("Deepgram response: %d — %s", r.status_code, r.text[:300])
+        log.info("Deepgram %d: %s", r.status_code, r.text[:300])
         r.raise_for_status()
         data = r.json()
         return data["results"]["channels"][0]["alternatives"][0]["transcript"]
@@ -240,13 +262,27 @@ async def index():
 async def ws_endpoint(ws: WebSocket):
     await ws.accept()
     history = [{"role": "system", "content": SYSTEM_PROMPT}]
+    pending_mime = ""
     try:
         while True:
-            data = await ws.receive_bytes()
+            msg = await ws.receive()
+            # Text frame: mime hint sent just before binary audio
+            if msg["type"] == "websocket.receive" and msg.get("text"):
+                payload = json.loads(msg["text"])
+                if payload.get("type") == "audio_mime":
+                    pending_mime = payload.get("mime", "")
+                    log.info("Browser reported mime: %s", pending_mime)
+                continue
+            data = msg.get("bytes") or b""
+            if not data:
+                continue
+
+            mime = pending_mime
+            pending_mime = ""
 
             # 1. Transcribe
             try:
-                transcript = await transcribe(data)
+                transcript = await transcribe(data, mime)
             except Exception as e:
                 await ws.send_text(json.dumps({"type": "error", "text": f"STT failed: {e}"}))
                 continue
