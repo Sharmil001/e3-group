@@ -365,6 +365,21 @@ class TestSourceCodePatterns(unittest.TestCase):
             "prefill() no longer selects text embed — will embed text tokens incorrectly",
         )
 
+    def test_prefill_step_method_exists(self):
+        src = self._src("qwen_megakernel/qwen_megakernel/model.py")
+        self.assertIn("def prefill_step", src,
+                      "Decoder.prefill_step missing — last prompt token will use codec embed on text token ID")
+
+    def test_patched_forward_uses_prefill_step_for_initial_call(self):
+        src = self._src("tts_backend/model.py")
+        self.assertIn("megakernel.prefill_step(last)", src,
+                      "patched_forward must call prefill_step (text embed) for last prompt token")
+
+    def test_patched_forward_uses_step_for_subsequent_calls(self):
+        src = self._src("tts_backend/model.py")
+        self.assertIn("megakernel.step(last)", src,
+                      "patched_forward must call step (codec embed) for audio tokens")
+
     def test_old_lm_head_key_not_used_as_lm_head_var(self):
         """Old code had: lm_head_key = 'talker.lm_head.weight' — must be gone."""
         src = self._src("qwen_megakernel/qwen_megakernel/model.py")

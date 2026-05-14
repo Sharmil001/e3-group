@@ -410,6 +410,46 @@ class Decoder:
         hidden = self._norm_out.clone()
         return self._out_token.item(), hidden
 
+    def prefill_step(self, token_id: int) -> tuple[int, torch.Tensor]:
+        """Process one token with text embedding, returning (next_token, hidden).
+
+        Used for the last prompt token: it is a text token (ID up to 151935)
+        so it must use text_embedding, not codec_embedding (which only has ~3072
+        entries). Calling step() on a text token would be an out-of-bounds lookup
+        in the codec embedding table, producing NaN logits and a CUDA assert.
+        """
+        embed = self._text_embed_weight if self._text_embed_weight is not None else self._embed_weight
+        _decode(
+            self._out_token,
+            int(token_id),
+            embed,
+            self._layer_weights_packed,
+            self._final_norm_weight,
+            self._lm_head_weight,
+            self._cos_table,
+            self._sin_table,
+            self._k_cache,
+            self._v_cache,
+            self._hidden,
+            self._act,
+            self._res,
+            self._q,
+            self._k,
+            self._v,
+            self._attn_out,
+            self._mlp_inter,
+            self._norm_out,
+            self._bmax_vals,
+            self._bmax_idxs,
+            NUM_LAYERS,
+            self._position,
+            MAX_SEQ_LEN,
+            self._attn_scale,
+        )
+        self._position += 1
+        hidden = self._norm_out.clone()
+        return self._out_token.item(), hidden
+
     def prefill(self, token_ids: list[int]) -> None:
         """Step through a prompt without keeping outputs (warm KV cache).
 

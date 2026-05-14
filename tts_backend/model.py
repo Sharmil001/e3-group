@@ -74,8 +74,12 @@ class MegakernelTalker:
         self._dec.prefill(token_ids)
 
     def step(self, token_id: int) -> tuple[int, torch.Tensor]:
-        """Returns `(next_token, hidden_fp32[HIDDEN_SIZE])`."""
+        """Returns `(next_token, hidden_fp32[HIDDEN_SIZE])` using codec embedding."""
         return self._dec.step_with_hidden(token_id)
+
+    def prefill_step(self, token_id: int) -> tuple[int, torch.Tensor]:
+        """Like step() but uses text embedding — for the last prompt token."""
+        return self._dec.prefill_step(token_id)
 
     @property
     def position(self) -> int:
@@ -203,14 +207,22 @@ class _HFSwapTTS:
         def patched_forward(input_ids=None, past_key_values=None, **kwargs):
             ids = input_ids.flatten().tolist() if input_ids is not None else []
             if state["new_stream"]:
+                # All ids here are TEXT tokens (up to vocab 151936). The codec
+                # embedding only has ~3072 entries, so we must use text_embedding
+                # for every prompt token — including the last one. Calling
+                # megakernel.step() on a text token would be an out-of-bounds
+                # embed lookup → NaN logits → CUDA assert in torch.multinomial.
                 megakernel.reset()
                 if len(ids) > 1:
                     megakernel.prefill(ids[:-1])
                 last = int(ids[-1]) if ids else 0
                 state["new_stream"] = False
+                tok, hidden = megakernel.prefill_step(last)
             else:
+                # Subsequent calls carry audio tokens (0..vocab_size-1) which
+                # are within the codec embedding range — use the normal step.
                 last = int(ids[-1]) if ids else 0
-            tok, hidden = megakernel.step(last)
+                tok, hidden = megakernel.step(last)
             state["next_token"] = int(tok)
             # Code predictor expects shape [B, T, H] in bf16.
             hidden_btH = hidden.to(torch.bfloat16).view(1, 1, -1)
