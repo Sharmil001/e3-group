@@ -204,14 +204,28 @@ class _HFSwapTTS:
         megakernel = self.talker
         state = {"new_stream": True, "next_token": 0}
 
-        def patched_forward(input_ids=None, past_key_values=None, **kwargs):
+        # Save original before patching so we can delegate when needed.
+        _orig_forward = talker.model.forward
+
+        def patched_forward(input_ids=None, past_key_values=None,
+                            inputs_embeds=None, **kwargs):
+            # qwen_tts Qwen3TTSTalkerForConditionalGeneration always passes
+            # inputs_embeds (combined codec + text conditioning) to the backbone
+            # — never plain input_ids. The megakernel requires integer token IDs;
+            # it cannot consume pre-computed embeddings. Delegate these calls to
+            # the original backbone so generation works correctly.
+            if inputs_embeds is not None:
+                return _orig_forward(
+                    input_ids=input_ids,
+                    past_key_values=past_key_values,
+                    inputs_embeds=inputs_embeds,
+                    **kwargs,
+                )
+
+            # Fallback path for models that do pass plain input_ids to the
+            # backbone (non-qwen_tts architectures, tests, future versions).
             ids = input_ids.flatten().tolist() if input_ids is not None else []
             if state["new_stream"]:
-                # All ids here are TEXT tokens (up to vocab 151936). The codec
-                # embedding only has ~3072 entries, so we must use text_embedding
-                # for every prompt token — including the last one. Calling
-                # megakernel.step() on a text token would be an out-of-bounds
-                # embed lookup → NaN logits → CUDA assert in torch.multinomial.
                 megakernel.reset()
                 if len(ids) > 1:
                     megakernel.prefill(ids[:-1])
@@ -219,17 +233,10 @@ class _HFSwapTTS:
                 state["new_stream"] = False
                 tok, hidden = megakernel.prefill_step(last)
             else:
-                # Subsequent calls carry audio tokens (0..vocab_size-1) which
-                # are within the codec embedding range — use the normal step.
                 last = int(ids[-1]) if ids else 0
                 tok, hidden = megakernel.step(last)
             state["next_token"] = int(tok)
-            # Code predictor expects shape [B, T, H] in bf16.
             hidden_btH = hidden.to(torch.bfloat16).view(1, 1, -1)
-            # Return all standard BaseModelOutputWithPast fields so qwen_tts
-            # talker.forward can splat them without AttributeError. Fields we
-            # don't compute (attentions etc.) are None — qwen_tts passes them
-            # through without inspecting values.
             return SimpleNamespace(
                 last_hidden_state=hidden_btH,
                 hidden_states=hidden_btH,
@@ -240,18 +247,10 @@ class _HFSwapTTS:
             )
 
         talker.model.forward = patched_forward
-        # Also bypass the upstream lm_head by overriding it to a passthrough
-        # that returns the megakernel's already-sampled token id as logits
-        # with a one-hot peak. Cheap and correct for greedy sampling, which
-        # the megakernel already does.
         if hasattr(talker, "lm_head"):
             vocab = megakernel.vocab_size
 
             def passthrough_lm_head(hidden):
-                # Upstream greedy/sampling code expects logits. The megakernel
-                # already computed the argmax, so return logits with a single
-                # large peak at that token. This preserves upstream generation
-                # plumbing while ensuring the selected token comes from CUDA.
                 B, T, _ = hidden.shape
                 logits = torch.full(
                     (B, T, vocab), -1e4, dtype=torch.float32, device=hidden.device
@@ -283,13 +282,23 @@ class _HFSwapTTS:
                 ref = (np.zeros(int(0.5 * SAMPLE_RATE), dtype=np.float32), SAMPLE_RATE)
                 ref_text = " "
             kw: dict = dict(text=text, ref_audio=ref, ref_text=ref_text,
-                            non_streaming_mode=False)
-            gen = stream_owner.generate_voice_clone(**kw)
+                            non_streaming_mode=True)
+            # generate_voice_clone returns (audio_list, sr) as a plain tuple,
+            # not a generator. non_streaming_mode=True gives all chunks at once.
+            audio_list, _sr = stream_owner.generate_voice_clone(**kw)
+            chunks = audio_list if isinstance(audio_list, (list, tuple)) else [audio_list]
+            for chunk in chunks:
+                yield np.asarray(chunk, dtype=np.float32).reshape(-1)
+            return
         elif hasattr(stream_owner, "generate_custom_voice"):
             speakers = list(stream_owner.get_supported_speakers() or [])
             kw = dict(text=text, speaker=speakers[0] if speakers else "Chelsie",
-                      non_streaming_mode=False)
-            gen = stream_owner.generate_custom_voice(**kw)
+                      non_streaming_mode=True)
+            audio_list, _sr = stream_owner.generate_custom_voice(**kw)
+            chunks = audio_list if isinstance(audio_list, (list, tuple)) else [audio_list]
+            for chunk in chunks:
+                yield np.asarray(chunk, dtype=np.float32).reshape(-1)
+            return
         elif hasattr(stream_owner, "stream_generate_voice_clone"):
             # Legacy upstream API
             kw = dict(
@@ -312,11 +321,6 @@ class _HFSwapTTS:
                 "Loaded Qwen3-TTS object does not expose a generation API. "
                 f"Available: {[m for m in dir(stream_owner) if not m.startswith('_')]}"
             )
-
-        for audio_batch, _sr in gen:
-            batch = audio_batch if isinstance(audio_batch, (list, tuple)) else [audio_batch]
-            for chunk in batch:
-                yield np.asarray(chunk, dtype=np.float32).reshape(-1)
 
 
 def _default_voice_prompt(model):

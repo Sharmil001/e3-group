@@ -380,6 +380,22 @@ class TestSourceCodePatterns(unittest.TestCase):
         self.assertIn("megakernel.step(last)", src,
                       "patched_forward must call step (codec embed) for audio tokens")
 
+    def test_patched_forward_delegates_inputs_embeds_to_orig(self):
+        src = self._src("tts_backend/model.py")
+        self.assertIn("inputs_embeds is not None", src,
+                      "patched_forward must detect inputs_embeds and fall back to original "
+                      "backbone — qwen_tts always passes inputs_embeds, never input_ids")
+        self.assertIn("_orig_forward", src,
+                      "original backbone must be saved and called when inputs_embeds provided")
+
+    def test_stream_unpacks_generate_voice_clone_as_tuple(self):
+        src = self._src("tts_backend/model.py")
+        self.assertIn("audio_list, _sr = stream_owner.generate_voice_clone", src,
+                      "generate_voice_clone returns (audio_list, sr) tuple — "
+                      "must unpack directly, not iterate as (chunk, sr) pairs")
+        self.assertNotIn("for audio_batch, _sr in gen", src,
+                         "old iteration over (chunk, sr) pairs removed — was wrong for qwen_tts 0.1.1")
+
     def test_old_lm_head_key_not_used_as_lm_head_var(self):
         """Old code had: lm_head_key = 'talker.lm_head.weight' — must be gone."""
         src = self._src("qwen_megakernel/qwen_megakernel/model.py")
