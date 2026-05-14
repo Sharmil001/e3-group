@@ -85,7 +85,7 @@ class MegakernelTTSService(TTSService):
     def can_generate_metrics(self) -> bool:  # type: ignore[override]
         return True
 
-    async def run_tts(self, text: str) -> AsyncGenerator[Frame, None]:  # type: ignore[override]
+    async def run_tts(self, text: str, context_id: str = "") -> AsyncGenerator[Frame, None]:  # type: ignore[override]
         """Stream a single utterance. Yields TTSStartedFrame -> TTSAudioRawFrame*
         -> TTSStoppedFrame."""
 
