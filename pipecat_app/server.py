@@ -24,6 +24,7 @@ from fastapi import BackgroundTasks, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 
+from aiortc import RTCIceServer
 from pipecat.transports.smallwebrtc.connection import SmallWebRTCConnection
 from pipecat.transports.smallwebrtc.request_handler import (
     IceCandidate,
@@ -62,19 +63,19 @@ ICE_SERVERS = [
     },
 ]
 
-# aiortc ice_servers format
+# aiortc RTCIceServer objects (required by SmallWebRTCRequestHandler)
 AIORTC_ICE_SERVERS = [
-    {"urls": "stun:stun.l.google.com:19302"},
-    {
-        "urls": "turn:openrelay.metered.ca:80",
-        "username": "openrelayproject",
-        "credential": "openrelayproject",
-    },
-    {
-        "urls": "turn:openrelay.metered.ca:443?transport=tcp",
-        "username": "openrelayproject",
-        "credential": "openrelayproject",
-    },
+    RTCIceServer(urls=["stun:stun.l.google.com:19302"]),
+    RTCIceServer(
+        urls=["turn:openrelay.metered.ca:80"],
+        username="openrelayproject",
+        credential="openrelayproject",
+    ),
+    RTCIceServer(
+        urls=["turn:openrelay.metered.ca:443?transport=tcp"],
+        username="openrelayproject",
+        credential="openrelayproject",
+    ),
 ]
 
 
