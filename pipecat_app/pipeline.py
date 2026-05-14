@@ -32,6 +32,7 @@ from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
 from pipecat.processors.aggregators.llm_context import LLMContext
+from pipecat.processors.aggregators.llm_response import LLMFullResponseAggregator
 from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair
 from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.openai.llm import OpenAILLMService
@@ -46,8 +47,8 @@ logging.basicConfig(
 )
 
 SYSTEM_PROMPT = (
-    "You are a helpful, concise voice assistant. Keep replies under two short"
-    " sentences unless explicitly asked for more. Speak naturally."
+    "You are a helpful voice assistant. Reply in exactly ONE short sentence. "
+    "Never use bullet points or multiple sentences. Be direct and natural."
 )
 
 
@@ -98,12 +99,18 @@ async def bot(runner_args) -> None:  # type: ignore[type-arg]
     ctx_aggr = LLMContextAggregatorPair(context)
 
     # ── Pipeline ──────────────────────────────────────────────────────────────
+    # LLMFullResponseAggregator batches the entire LLM reply into a single
+    # TextFrame before passing it to TTS — one TTS call per turn, no
+    # sentence-by-sentence splitting that would interleave across turns.
+    llm_full = LLMFullResponseAggregator()
+
     pipeline = Pipeline(
         [
             transport.input(),
             stt,
             ctx_aggr.user(),
             llm,
+            llm_full,
             tts,
             transport.output(),
             ctx_aggr.assistant(),
