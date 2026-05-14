@@ -7,7 +7,6 @@ from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
 from pipecat.processors.aggregators.llm_context import LLMContext
-from pipecat.processors.aggregators.llm_response import LLMFullResponseAggregator
 from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair
 from pipecat.runner.run import main
 from pipecat.runner.types import DailyRunnerArguments, SmallWebRTCRunnerArguments
@@ -67,14 +66,12 @@ async def bot(runner_args) -> None:
 
     context = LLMContext(messages=[{"role": "system", "content": SYSTEM_PROMPT}])
     ctx_aggr = LLMContextAggregatorPair(context)
-    llm_full = LLMFullResponseAggregator()
 
     pipeline = Pipeline([
         transport.input(),
         stt,
         ctx_aggr.user(),
         llm,
-        llm_full,
         tts,
         transport.output(),
         ctx_aggr.assistant(),
