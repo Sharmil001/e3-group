@@ -1,5 +1,3 @@
-"""Shared benchmark utilities."""
-
 from __future__ import annotations
 
 import statistics
@@ -31,7 +29,6 @@ class TimingStats:
     @property
     def p95_ms(self) -> float:
         if self.n < 20:
-            # Fall back to max for very small samples
             return max(self.samples_ms)
         s = sorted(self.samples_ms)
         return s[int(0.95 * (self.n - 1))]

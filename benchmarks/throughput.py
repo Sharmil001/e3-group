@@ -1,17 +1,8 @@
-"""Pure megakernel decode throughput, both for the base Qwen3-0.6B and the
-TTS talker.
+"""Pure megakernel decode throughput — no code predictor, no audio decoder.
 
-Methodology:
-    - WARMUP runs (default 3): discard timings.
-    - RUNS runs (default 20): time `Decoder.generate(prompt, TOKENS)` with
-      `torch.cuda.synchronize()` bracketing.
-    - Report min / median / p95 / mean tok/s.
-
-Outputs:
-    Two TimingStats blocks: ms-per-token and tok-per-second derived.
-
-This benchmark exercises ONLY the megakernel — no code predictor, no audio
-decoder, no Pipecat. It is the upper bound for the rest of the system.
+Usage:
+    python -m benchmarks.throughput --model talker --runs 20
+    python -m benchmarks.throughput --model base   --runs 20
 """
 
 from __future__ import annotations
@@ -23,14 +14,13 @@ import time
 
 import torch
 
-from benchmarks._common import TimingStats, print_table, summarize
+from benchmarks._common import print_table, summarize
 
 
 def bench_run(decoder, prompt_tokens: int, gen_tokens: int) -> float:
     torch.cuda.synchronize()
     t0 = time.perf_counter()
     decoder.reset()
-    # Use a known seed token; we only care about timing.
     seed = 0
     decoder.prefill([seed] * (prompt_tokens - 1))
     last = seed
@@ -47,11 +37,7 @@ def main() -> None:
     p.add_argument("--prompt-tokens", type=int, default=4)
     p.add_argument("--warmup", type=int, default=3)
     p.add_argument("--runs", type=int, default=20)
-    p.add_argument(
-        "--model-name",
-        default=os.getenv("BENCH_MODEL_NAME"),
-        help="HF repo id (overrides default per --model)",
-    )
+    p.add_argument("--model-name", default=os.getenv("BENCH_MODEL_NAME"))
     args = p.parse_args()
 
     from qwen_megakernel.model import Decoder
@@ -86,9 +72,8 @@ def main() -> None:
     print_table(rows)
 
     tps_samples = [args.tokens / (ms / 1000.0) for ms in samples_total_ms]
-    tps = summarize(f"{args.model}: tokens / sec", tps_samples)
     print()
-    print(tps.format())
+    print(summarize(f"{args.model}: tokens / sec", tps_samples).format())
 
 
 if __name__ == "__main__":

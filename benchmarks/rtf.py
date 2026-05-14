@@ -1,8 +1,6 @@
-"""Real-time factor (RTF) = wall_time / audio_duration.
+"""Real-time factor (RTF = wall_time / audio_duration) benchmark.
 
-Measures end-to-end TTS RTF for a fixed set of utterances of varying length
-(targeting ~1 s, ~5 s, ~10 s of audio). RTF < 1 is faster than real time; we
-target < 0.15 (stretch) / < 0.3 (deliverable).
+Targets: RTF < 0.15 (stretch) / < 0.3 (deliverable).
 """
 
 from __future__ import annotations
@@ -12,10 +10,7 @@ import asyncio
 import os
 import time
 
-import numpy as np
-
 from benchmarks._common import print_table, summarize
-
 
 UTTERANCES = {
     "short_~1s": "Hello, this is a short test sentence.",
@@ -55,9 +50,8 @@ async def _run(args) -> dict[str, list[float]]:
                 samples += chunk.pcm.shape[0]
             wall = time.perf_counter() - t0
             duration = samples / streamer.engine.sample_rate
-            if duration <= 0:
-                continue
-            results[label].append(wall / duration)
+            if duration > 0:
+                results[label].append(wall / duration)
     return results
 
 
@@ -67,18 +61,13 @@ def main() -> None:
     args = p.parse_args()
 
     results = asyncio.run(_run(args))
-    rows = []
-    for label, samples in results.items():
-        if not samples:
-            continue
-        # Convert RTF (unitless) to ms so we can reuse the formatter; the units
-        # column will read "ms" but the magnitudes are interpretable as RTF*1000.
-        ms = [s * 1000.0 for s in samples]
-        rows.append(summarize(f"RTF*1000 [{label}]", ms))
+    rows = [
+        summarize(f"RTF*1000 [{label}]", [s * 1000.0 for s in samples])
+        for label, samples in results.items()
+        if samples
+    ]
     print_table(rows)
-
-    print("\nInterpret values above as RTF * 1000 (lower is better). "
-          "Targets: <150 (stretch), <300 (deliverable).")
+    print("\nValues above are RTF * 1000. Targets: <150 (stretch), <300 (deliverable).")
 
 
 if __name__ == "__main__":

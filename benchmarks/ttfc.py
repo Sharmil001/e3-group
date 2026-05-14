@@ -1,16 +1,8 @@
-"""Time-to-first-audio-chunk (TTFC) for the end-to-end TTS pipeline.
+"""Time-to-first-audio-chunk (TTFC) benchmark.
 
-Two measurement modes:
-
-    --mode local
-        Call `TTSStreamer.synthesize(text)` directly, measure from entry to
-        the first AudioChunk yielded. Isolates the TTS engine itself.
-
-    --mode ws
-        Connect to a running TTS WebSocket server (`ws://...`), send a text
-        request, and time from send → first binary frame. Includes loopback
-        network cost (~0.5 ms on localhost). This is the number the Pipecat
-        service experiences.
+Modes:
+    --mode local   TTSStreamer.synthesize() directly — engine only, no network
+    --mode ws      WebSocket round-trip — includes loopback cost (~0.5 ms)
 """
 
 from __future__ import annotations
@@ -21,10 +13,7 @@ import json
 import os
 import time
 
-import numpy as np
-
 from benchmarks._common import print_table, summarize
-
 
 DEFAULT_TEXTS = [
     "Hello, how are you today?",
@@ -66,7 +55,6 @@ async def _bench_ws(args) -> list[float]:
 
     samples = []
     async with websockets.connect(args.url, max_size=2**24) as ws:
-        # warmup
         for _ in range(args.warmup):
             await ws.send(json.dumps({"text": "Hello."}))
             await _drain(ws)
@@ -78,15 +66,13 @@ async def _bench_ws(args) -> list[float]:
                 while True:
                     msg = await ws.recv()
                     if isinstance(msg, bytes):
-                        t_first = time.perf_counter()
-                        samples.append((t_first - t0) * 1000.0)
+                        samples.append((time.perf_counter() - t0) * 1000.0)
                         break
                 await _drain(ws)
     return samples
 
 
 async def _drain(ws) -> None:
-    """Read until we see the `stopped` event."""
     while True:
         msg = await ws.recv()
         if isinstance(msg, str):
@@ -106,13 +92,8 @@ def main() -> None:
     p.add_argument("--runs", type=int, default=20)
     args = p.parse_args()
 
-    if args.mode == "local":
-        samples = asyncio.run(_bench_local(args))
-    else:
-        samples = asyncio.run(_bench_ws(args))
-
-    rows = [summarize(f"TTFC ({args.mode})", samples)]
-    print_table(rows)
+    samples = asyncio.run(_bench_local(args) if args.mode == "local" else _bench_ws(args))
+    print_table([summarize(f"TTFC ({args.mode})", samples)])
 
 
 if __name__ == "__main__":

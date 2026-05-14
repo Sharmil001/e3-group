@@ -1,23 +1,9 @@
-"""Standalone FastAPI server for the voice-agent demo.
-
-Replaces the pipecat runner with a custom setup so we can inject TURN
-server credentials for both the browser and server-side ICE negotiation.
-Without TURN, WebRTC fails when the GPU is behind Docker NAT (Vast.ai).
-
-Uses openrelay.metered.ca free public TURN relay.
-
-Run:
-    python -m pipecat_app.server
-"""
-
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 import uuid
 from contextlib import asynccontextmanager
-from typing import Any
 
 import uvicorn
 from fastapi import BackgroundTasks, FastAPI, Request
@@ -34,53 +20,25 @@ from pipecat.transports.smallwebrtc.request_handler import (
 )
 from pipecat_ai_small_webrtc_prebuilt.frontend import SmallWebRTCPrebuiltUI
 
-
 log = logging.getLogger(__name__)
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s %(message)s",
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 
-# ── TURN/STUN configuration ───────────────────────────────────────────────────
-# Uses openrelay.metered.ca free public TURN relay to traverse Docker/Vast.ai NAT.
+# openrelay.metered.ca free TURN — needed to traverse Docker/Vast.ai NAT
 ICE_SERVERS = [
     {"urls": "stun:stun.l.google.com:19302"},
-    {"urls": "stun:openrelay.metered.ca:80"},
-    {
-        "urls": "turn:openrelay.metered.ca:80",
-        "username": "openrelayproject",
-        "credential": "openrelayproject",
-    },
-    {
-        "urls": "turn:openrelay.metered.ca:443",
-        "username": "openrelayproject",
-        "credential": "openrelayproject",
-    },
-    {
-        "urls": "turn:openrelay.metered.ca:443?transport=tcp",
-        "username": "openrelayproject",
-        "credential": "openrelayproject",
-    },
+    {"urls": "turn:openrelay.metered.ca:80", "username": "openrelayproject", "credential": "openrelayproject"},
+    {"urls": "turn:openrelay.metered.ca:443", "username": "openrelayproject", "credential": "openrelayproject"},
+    {"urls": "turn:openrelay.metered.ca:443?transport=tcp", "username": "openrelayproject", "credential": "openrelayproject"},
 ]
 
-# aiortc RTCIceServer objects (required by SmallWebRTCRequestHandler)
 AIORTC_ICE_SERVERS = [
     RTCIceServer(urls=["stun:stun.l.google.com:19302"]),
-    RTCIceServer(
-        urls=["turn:openrelay.metered.ca:80"],
-        username="openrelayproject",
-        credential="openrelayproject",
-    ),
-    RTCIceServer(
-        urls=["turn:openrelay.metered.ca:443?transport=tcp"],
-        username="openrelayproject",
-        credential="openrelayproject",
-    ),
+    RTCIceServer(urls=["turn:openrelay.metered.ca:80"], username="openrelayproject", credential="openrelayproject"),
+    RTCIceServer(urls=["turn:openrelay.metered.ca:443?transport=tcp"], username="openrelayproject", credential="openrelayproject"),
 ]
 
 
 async def run_bot(webrtc_connection: SmallWebRTCConnection) -> None:
-    """Run the full voice-agent pipeline for one WebRTC connection."""
     from pipecat.pipeline.pipeline import Pipeline
     from pipecat.pipeline.runner import PipelineRunner
     from pipecat.pipeline.task import PipelineParams, PipelineTask
@@ -95,11 +53,7 @@ async def run_bot(webrtc_connection: SmallWebRTCConnection) -> None:
 
     transport = SmallWebRTCTransport(
         webrtc_connection=webrtc_connection,
-        params=TransportParams(
-            audio_in_enabled=True,
-            audio_out_enabled=True,
-            audio_out_sample_rate=24000,
-        ),
+        params=TransportParams(audio_in_enabled=True, audio_out_enabled=True, audio_out_sample_rate=24000),
     )
 
     stt = DeepgramSTTService(api_key=os.environ["DEEPGRAM_API_KEY"])
@@ -107,47 +61,28 @@ async def run_bot(webrtc_connection: SmallWebRTCConnection) -> None:
         api_key=os.environ["OPENAI_API_KEY"],
         model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
     )
-    tts = MegakernelTTSService(
-        url=os.getenv("TTS_WS_URL", "ws://localhost:8765/tts"),
-        sample_rate=24000,
-    )
+    tts = MegakernelTTSService(url=os.getenv("TTS_WS_URL", "ws://localhost:8765/tts"), sample_rate=24000)
 
-    context = LLMContext(
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "You are a helpful, concise voice assistant. "
-                    "Keep replies under two short sentences unless explicitly asked for more. "
-                    "Speak naturally."
-                ),
-            }
-        ]
-    )
+    context = LLMContext(messages=[{
+        "role": "system",
+        "content": "You are a helpful, concise voice assistant. Keep replies to one short sentence.",
+    }])
     ctx_aggr = LLMContextAggregatorPair(context)
 
-    pipeline = Pipeline(
-        [
-            transport.input(),
-            stt,
-            ctx_aggr.user(),
-            llm,
-            tts,
-            transport.output(),
-            ctx_aggr.assistant(),
-        ]
-    )
+    pipeline = Pipeline([
+        transport.input(),
+        stt,
+        ctx_aggr.user(),
+        llm,
+        tts,
+        transport.output(),
+        ctx_aggr.assistant(),
+    ])
 
-    task = PipelineTask(
-        pipeline,
-        params=PipelineParams(audio_out_sample_rate=24000),
-    )
-
+    task = PipelineTask(pipeline, params=PipelineParams(audio_out_sample_rate=24000))
     runner = PipelineRunner(handle_sigint=False)
     await runner.run(task)
 
-
-# ── FastAPI app ───────────────────────────────────────────────────────────────
 
 handler = SmallWebRTCRequestHandler(ice_servers=AIORTC_ICE_SERVERS)
 
@@ -159,15 +94,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Serve the prebuilt Pipecat Playground frontend at /client/
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 app.mount("/client", SmallWebRTCPrebuiltUI)
 
 
@@ -177,12 +104,8 @@ async def root():
 
 
 @app.post("/start")
-async def start(request: Request):
-    """Return a session ID and TURN ICE config to the browser."""
-    return {
-        "sessionId": str(uuid.uuid4()),
-        "iceConfig": {"iceServers": ICE_SERVERS},
-    }
+async def start():
+    return {"sessionId": str(uuid.uuid4()), "iceConfig": {"iceServers": ICE_SERVERS}}
 
 
 @app.post("/api/offer")
@@ -203,29 +126,30 @@ async def ice_candidate(request: SmallWebRTCPatchRequest):
 @app.get("/sessions/{session_id}/{path:path}")
 @app.patch("/sessions/{session_id}/{path:path}")
 async def session_proxy(session_id: str, path: str, request: Request, background_tasks: BackgroundTasks):
-    """Proxy Pipecat-Cloud-style /sessions/<id>/api/offer calls to /api/offer."""
     if path.endswith("api/offer"):
         data = await request.json()
         if request.method == "POST":
-            webrtc_req = SmallWebRTCRequest(
-                sdp=data["sdp"],
-                type=data["type"],
-                pc_id=data.get("pc_id"),
-                restart_pc=data.get("restart_pc"),
-                request_data=data.get("request_data") or data.get("requestData"),
+            return await offer(
+                SmallWebRTCRequest(
+                    sdp=data["sdp"],
+                    type=data["type"],
+                    pc_id=data.get("pc_id"),
+                    restart_pc=data.get("restart_pc"),
+                    request_data=data.get("request_data") or data.get("requestData"),
+                ),
+                background_tasks,
             )
-            return await offer(webrtc_req, background_tasks)
         if request.method == "PATCH":
-            patch_req = SmallWebRTCPatchRequest(
-                pc_id=data["pc_id"],
-                candidates=[IceCandidate(**c) for c in data.get("candidates", [])],
+            return await ice_candidate(
+                SmallWebRTCPatchRequest(
+                    pc_id=data["pc_id"],
+                    candidates=[IceCandidate(**c) for c in data.get("candidates", [])],
+                )
             )
-            return await ice_candidate(patch_req)
     return {"status": "ok"}
 
 
 if __name__ == "__main__":
     port = int(os.getenv("SERVER_PORT", "7860"))
-    log.info("Starting voice-agent server on port %d", port)
-    log.info("Open http://localhost:%d/client/ in your browser", port)
+    log.info("Starting on port %d — open http://localhost:%d/client/", port, port)
     uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")

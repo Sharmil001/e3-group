@@ -1,13 +1,3 @@
-"""Pipecat TTS service backed by the megakernel Qwen3-TTS WebSocket server.
-
-Subclasses `pipecat.services.tts_service.TTSService`. The service connects to
-the local TTS WebSocket on first use, sends one sentence at a time, and
-streams `TTSAudioRawFrame`s as soon as PCM bytes arrive — no full-utterance
-buffering.
-
-Default sample rate: 24000 Hz mono.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -15,96 +5,70 @@ import json
 import logging
 import os
 import time
-from typing import AsyncGenerator, Optional
+from collections.abc import AsyncGenerator
+from typing import Optional
 
 import numpy as np
+import websockets
 
-try:
-    import websockets
-except ImportError as e:
-    raise ImportError("`websockets` is required: pip install websockets") from e
-
-from pipecat.frames.frames import (
-    ErrorFrame,
-    Frame,
-    TTSAudioRawFrame,
-    TTSStartedFrame,
-    TTSStoppedFrame,
-)
+from pipecat.frames.frames import ErrorFrame, Frame, TTSAudioRawFrame, TTSStartedFrame, TTSStoppedFrame
 from pipecat.services.tts_service import TTSService
-
+from pipecat.utils.text.base_text_aggregator import Aggregation, AggregationType, BaseTextAggregator
 
 log = logging.getLogger(__name__)
 
 
-class MegakernelTTSService(TTSService):
-    """Streams audio from the local megakernel TTS WebSocket server.
+class _WholeResponseAggregator(BaseTextAggregator):
+    """Buffers the full LLM response so run_tts is called once, not per sentence."""
 
-    Args:
-        url: ws:// URL of the TTS backend (default `ws://localhost:8765/tts`)
-        sample_rate: backend sample rate (default 24000)
-        connect_timeout_s: max time to wait for the WS handshake
-        chunk_size_samples: optional re-chunking to a fixed sample count
-            before yielding. Useful to match a transport's preferred frame
-            size. Set 0 to disable.
-    """
+    def __init__(self):
+        super().__init__(aggregation_type=AggregationType.SENTENCE)
+        self._buf = ""
+
+    @property
+    def text(self) -> Aggregation:
+        return Aggregation(text=self._buf, type=AggregationType.SENTENCE)
+
+    async def aggregate(self, text: str):
+        self._buf += text
+        return
+        yield  # noqa: unreachable — satisfies AsyncIterator return type
+
+    async def flush(self) -> Aggregation | None:
+        if self._buf:
+            result, self._buf = self._buf, ""
+            return Aggregation(text=result, type=AggregationType.SENTENCE)
+        return None
+
+    async def handle_interruption(self):
+        self._buf = ""
+
+    async def reset(self):
+        self._buf = ""
+
+
+class MegakernelTTSService(TTSService):
+    """Pipecat TTS service backed by the megakernel Qwen3-TTS WebSocket server."""
 
     def __init__(
         self,
         *,
         url: Optional[str] = None,
         sample_rate: int = 24000,
-        connect_timeout_s: float = 5.0,
         chunk_size_samples: int = 0,
         **kwargs,
     ) -> None:
         super().__init__(sample_rate=sample_rate, **kwargs)
+        self._text_aggregator = _WholeResponseAggregator()
         self._url = url or os.getenv("TTS_WS_URL", "ws://localhost:8765/tts")
-        self._connect_timeout_s = connect_timeout_s
         self._chunk_size_samples = chunk_size_samples
-        self._ws = None
         self._lock = asyncio.Lock()
 
-    def _ws_is_open(self) -> bool:
-        if self._ws is None:
-            return False
-        # websockets ≥ 12 uses ClientConnection with .state; older uses .closed
-        try:
-            from websockets.connection import State
-            return self._ws.state == State.OPEN
-        except (ImportError, AttributeError):
-            pass
-        try:
-            return not self._ws.closed
-        except AttributeError:
-            return False
-
-    async def _ensure_ws(self):
-        if self._ws_is_open():
-            return self._ws
-        log.info("Connecting to TTS backend at %s", self._url)
-        self._ws = await asyncio.wait_for(
-            websockets.connect(self._url, max_size=2**24),
-            timeout=self._connect_timeout_s,
-        )
-        return self._ws
-
-    async def stop(self, frame=None) -> None:  # type: ignore[override]
-        try:
-            if self._ws_is_open():
-                await self._ws.close()
-        finally:
-            await super().stop(frame) if frame is not None else None
-
-    def can_generate_metrics(self) -> bool:  # type: ignore[override]
+    def can_generate_metrics(self) -> bool:
         return True
 
-    async def run_tts(self, text: str, context_id: str = "") -> AsyncGenerator[Frame, None]:  # type: ignore[override]
-        """Stream a single utterance — fresh WS connection per request.
-
-        Yields: TTSStartedFrame → TTSAudioRawFrame* → TTSStoppedFrame
-        """
-        async with self._lock:  # single-flight: megakernel has one global scratch buffer
+    async def run_tts(self, text: str, context_id: str = "") -> AsyncGenerator[Frame, None]:
+        async with self._lock:
             t_start = time.perf_counter()
             yield TTSStartedFrame()
 
@@ -129,11 +93,10 @@ class MegakernelTTSService(TTSService):
                                 if event == "error":
                                     yield ErrorFrame(payload.get("message", "tts error"))
                                 else:
-                                    log.info("TTS done: %.0f ms total", (time.perf_counter() - t_start) * 1000)
+                                    log.info("TTS done: %.0f ms", (time.perf_counter() - t_start) * 1000)
                                 break
                             continue
 
-                        # Binary frame: PCM float32
                         arr = np.frombuffer(msg, dtype=np.float32)
                         if first_chunk:
                             first_chunk = False
@@ -144,7 +107,7 @@ class MegakernelTTSService(TTSService):
                             n = (arr.shape[0] // self._chunk_size_samples) * self._chunk_size_samples
                             leftover = arr[n:]
                             for i in range(0, n, self._chunk_size_samples):
-                                yield self._make_audio_frame(arr[i:i + self._chunk_size_samples], sample_rate)
+                                yield self._make_audio_frame(arr[i : i + self._chunk_size_samples], sample_rate)
                         else:
                             yield self._make_audio_frame(arr, sample_rate)
 
@@ -158,14 +121,8 @@ class MegakernelTTSService(TTSService):
 
     @staticmethod
     def _make_audio_frame(pcm_f32: np.ndarray, sr: int) -> TTSAudioRawFrame:
-        # Pipecat expects PCM-int16 little-endian bytes.
-        clipped = np.clip(pcm_f32, -1.0, 1.0)
-        pcm_i16 = (clipped * 32767.0).astype(np.int16)
-        return TTSAudioRawFrame(
-            audio=pcm_i16.tobytes(),
-            sample_rate=sr,
-            num_channels=1,
-        )
+        pcm_i16 = (np.clip(pcm_f32, -1.0, 1.0) * 32767.0).astype(np.int16)
+        return TTSAudioRawFrame(audio=pcm_i16.tobytes(), sample_rate=sr, num_channels=1)
 
 
 __all__ = ["MegakernelTTSService"]
