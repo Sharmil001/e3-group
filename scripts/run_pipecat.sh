@@ -31,9 +31,11 @@ if [[ "$TRANSPORT" == "daily" ]]; then
     : "${DAILY_TOKEN:?Set DAILY_TOKEN for the daily transport}"
     exec python -m pipecat_app.pipeline --transport daily
 elif [[ "$TRANSPORT" == "local" ]]; then
-    # SmallWebRTC on port 8080; Vast.ai maps this to external port 33868.
-    # Open http://<vast_host>:33868/client/ in a browser to connect.
-    exec python -m pipecat_app.pipeline --transport webrtc --host 0.0.0.0 --port 8080
+    # SmallWebRTC on port 7860.
+    # Access via SSH tunnel on your laptop:
+    #   ssh -L 7860:localhost:7860 -p 33745 root@<vast_host> -N
+    # Then open http://localhost:7860/client/ in a browser.
+    exec python -m pipecat_app.pipeline --transport webrtc --host 0.0.0.0 --port 7860
 else
     echo "Unknown transport: $TRANSPORT (use 'local' or 'daily')" >&2
     exit 1
