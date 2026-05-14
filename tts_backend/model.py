@@ -320,6 +320,15 @@ class _ManualTTS:
     def _load_upstream(self) -> None:
         from transformers import AutoModel, AutoTokenizer
 
+        # Importing qwen_tts registers the qwen3_tts model type with
+        # transformers' AutoModel registry. Without this, AutoModel.from_pretrained
+        # raises ValueError("unknown architecture: qwen3_tts") even with
+        # trust_remote_code=True on transformers < 5.x.
+        try:
+            import qwen_tts  # noqa: F401
+        except Exception:
+            pass
+
         self.model = AutoModel.from_pretrained(
             self.cfg.model_name,
             trust_remote_code=True,
