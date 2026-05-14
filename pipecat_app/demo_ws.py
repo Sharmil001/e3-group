@@ -160,16 +160,30 @@ async function stopRec() {
 """
 
 
+async def _webm_to_wav(audio_bytes: bytes) -> bytes:
+    """Convert WebM/Opus from MediaRecorder to 16 kHz mono PCM WAV via ffmpeg."""
+    proc = await asyncio.create_subprocess_exec(
+        "ffmpeg", "-y", "-i", "pipe:0",
+        "-f", "wav", "-ar", "16000", "-ac", "1", "pipe:1",
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    wav, _ = await proc.communicate(audio_bytes)
+    return wav
+
+
 async def transcribe(audio_bytes: bytes) -> str:
-    """Send raw WebM audio to Deepgram REST API and return transcript."""
+    """Convert WebM to WAV then send to Deepgram REST API."""
+    wav = await _webm_to_wav(audio_bytes)
     async with httpx.AsyncClient(timeout=30) as client:
         r = await client.post(
             "https://api.deepgram.com/v1/listen?model=nova-2&smart_format=true",
             headers={
                 "Authorization": f"Token {DEEPGRAM_API_KEY}",
-                "Content-Type": "audio/webm",
+                "Content-Type": "audio/wav",
             },
-            content=audio_bytes,
+            content=wav,
         )
         r.raise_for_status()
         data = r.json()
