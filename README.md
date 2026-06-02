@@ -1,6 +1,5 @@
 # RTX 5090 Megakernel → Qwen3-TTS → Pipecat
 
-### DEMO LINK -> https://drive.google.com/file/d/13U80u7ZVWNA37K21byg9mDib5J7GR0VJ/view?usp=sharing
 ---
 
 Wires AlpinDale's [qwen_megakernel](https://github.com/AlpinDale/qwen_megakernel) as the talker decoder for Qwen3-TTS, streaming real-time speech into a Pipecat voice pipeline.
